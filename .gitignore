@@ -8,6 +8,7 @@ build/
 
 # Files
 *.zip
+*.dat
 *.png
 *.jpg
 *.jpeg
