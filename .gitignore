@@ -1,0 +1,21 @@
+# Flutter
+.dart_tool/
+.packages
+build/
+*.iml
+.idea/
+.metadata
+
+# Files
+*.zip
+*.png
+*.jpg
+*.jpeg
+nul
+
+# Backup
+BACKUP/
+
+# OS
+.DS_Store
+Thumbs.db
