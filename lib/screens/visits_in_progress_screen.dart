@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
 import '../providers/visit_provider.dart';
+import '../providers/connectivity_provider.dart';
 import '../models/visit.dart';
 import '../widgets/app_drawer.dart';
 import '../widgets/visit_card.dart';
@@ -80,7 +81,11 @@ class _VisitsInProgressScreenState extends State<VisitsInProgressScreen> {
       );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(success ? 'Visite clôturée' : 'Erreur lors de la clôture'),
+          content: Text(success
+              ? (context.read<ConnectivityProvider>().isConnected
+                  ? 'Visite clôturée'
+                  : 'Visite clôturée localement, synchronisation en attente')
+              : 'Erreur lors de la clôture'),
           backgroundColor: success ? Colors.green : Colors.red,
         ));
       }

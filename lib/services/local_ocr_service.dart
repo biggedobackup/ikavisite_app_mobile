@@ -239,7 +239,7 @@ class LocalOcrService {
     } else if (docClassName != null) {
       typeDoc = _getTypeFromDocName(docClassName);
     }
-    champs['Type de document'] = typeDoc ?? 'CNI';
+    champs['Type de document'] = typeDoc ?? 'AUTRE';
 
     final addressCountry = await results.textFieldValueByType(FieldType.ADDRESS_COUNTRY);
     if (addressCountry != null && addressCountry.trim().isNotEmpty) {
@@ -320,14 +320,18 @@ class LocalOcrService {
     code = code.toUpperCase();
     if (code.startsWith('P')) return 'PASSEPORT';
     if (code.startsWith('V')) return 'VISA';
-    return 'CNI';
+    if (code.startsWith('DL')) return 'PERMIS';
+    if (code.startsWith('ID')) return 'CNI';
+    return 'AUTRE';
   }
 
   String _getTypeFromDocName(String name) {
     name = name.toUpperCase();
     if (name.contains('PASSPORT') || name.contains('PASSEPORT')) return 'PASSEPORT';
     if (name.contains('VISA')) return 'VISA';
-    return 'CNI';
+    if (name.contains('DRIVING') || name.contains('DRIVER') || name.contains('PERMIS') || name.contains('LICENCE')) return 'PERMIS';
+    if (name.contains('ID CARD') || name.contains('IDENTITY') || name.contains('CARTE')) return 'CNI';
+    return 'AUTRE';
   }
 
   Scenario _getBestScenario() {

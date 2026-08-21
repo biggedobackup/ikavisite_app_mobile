@@ -22,44 +22,62 @@ class SyncService {
     debugPrint('SyncService: enqueued $action');
   }
 
-  Future<void> processQueue({required String? accessToken}) async {
+  Future<void> processQueue({
+    required String? accessToken,
+    Future<bool> Function()? onUnauthorized,
+  }) async {
     if (_isProcessing || accessToken == null) return;
     _isProcessing = true;
 
     try {
-      final pending = await _db.query('pending_sync',
-          where: 'status = ?', whereArgs: [0], orderBy: 'created_at ASC');
+      await _processQueue(accessToken, onUnauthorized);
+    } finally {
+      _isProcessing = false;
+    }
+  }
 
-      if (pending.isEmpty) {
-        _isProcessing = false;
-        return;
-      }
+  Future<void> _processQueue(
+      String accessToken, Future<bool> Function()? onUnauthorized) async {
+    final pending = await _db.query('pending_sync',
+        where: 'status = ?', whereArgs: [0], orderBy: 'created_at ASC');
 
-      debugPrint('SyncService: processing ${pending.length} pending items');
+    if (pending.isEmpty) return;
 
-      for (final item in pending) {
-        final id = item['id'] as int;
-        final action = item['action'] as String;
-        final payload = jsonDecode(item['payload'] as String) as Map<String, dynamic>;
+    debugPrint('SyncService: processing ${pending.length} pending items');
 
-        await _db.update('pending_sync',
-            {'status': 1},
+    for (final item in pending) {
+      final id = item['id'] as int;
+      final action = item['action'] as String;
+      final payload =
+          jsonDecode(item['payload'] as String) as Map<String, dynamic>;
+
+      await _db.update('pending_sync', {'status': 1},
+          where: 'id = ?', whereArgs: [id]);
+
+      try {
+        await _processAction(action, payload, accessToken);
+        await _db.delete('pending_sync',
             where: 'id = ?', whereArgs: [id]);
+        debugPrint('SyncService: completed $action (#$id)');
+      } catch (e) {
+        final msg = e.toString();
+        debugPrint('SyncService: failed $action (#$id): $e');
 
-        try {
-          await _processAction(action, payload, accessToken);
-          await _db.delete('pending_sync',
-              where: 'id = ?', whereArgs: [id]);
-          debugPrint('SyncService: completed $action (#$id)');
-        } catch (e) {
-          debugPrint('SyncService: failed $action (#$id): $e');
-          await _db.update('pending_sync',
-              {'status': 3},
+        if ((msg.contains('401') || msg.contains('Unauthorized')) &&
+            onUnauthorized != null) {
+          final refreshed = await onUnauthorized();
+          if (refreshed) {
+            await _db.update('pending_sync', {'status': 0},
+                where: 'id = ?', whereArgs: [id]);
+          } else {
+            await _db.update('pending_sync', {'status': 0},
+                where: 'id = ?', whereArgs: [id]);
+          }
+        } else {
+          await _db.update('pending_sync', {'status': 0},
               where: 'id = ?', whereArgs: [id]);
         }
       }
-    } finally {
-      _isProcessing = false;
     }
   }
 
@@ -76,12 +94,30 @@ class SyncService {
         );
         break;
       case 'create_visite':
-        await _visitService.createVisite(accessToken, payload);
+        final terminerApres = payload.remove('_terminer_apres_creation') == true;
+        final terminationBody = payload.remove('_termination_body') as Map<String, dynamic>?;
+        final created = await _visitService.createVisite(accessToken, payload);
+        if (terminerApres) {
+          try {
+            await _visitService.terminerVisite(accessToken, created.id, body: terminationBody);
+          } catch (e) {
+            debugPrint('SyncService: clôture après création échouée, rejetée : $e');
+            await enqueue('terminer_visite', {
+              '_visite_id': created.id,
+              ...?terminationBody,
+            });
+          }
+        }
         break;
       case 'update_visite':
         final id = payload['_visite_id'] as int;
         payload.remove('_visite_id');
         await _visitService.updateVisite(accessToken, id, payload);
+        break;
+      case 'terminer_visite':
+        final id = payload['_visite_id'] as int;
+        payload.remove('_visite_id');
+        await _visitService.terminerVisite(accessToken, id, body: payload);
         break;
       default:
         throw Exception('Unknown action: $action');

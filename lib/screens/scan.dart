@@ -274,41 +274,49 @@ class _ScanScreenState extends State<ScanScreen> {
 
       ScanResultData? finalData;
       if (_scanData?.rectoImage != null) {
-        finalData = await _lancerOcrPipeline(_scanData!.rectoImage!, versoFile);
+        final versoResult = await _lancerOcrPipeline(_scanData!.rectoImage!, versoFile);
+        if (versoResult != null) {
+          finalData = _mergeScanResults(_scanData!, versoResult, versoFile);
+        }
       }
 
-      if (finalData != null) {
-        if (finalData.portrait == null && _scanData?.portrait != null) {
-          finalData = ScanResultData(
-            nom: finalData.nom,
-            prenom: finalData.prenom,
-            dateNaissance: finalData.dateNaissance,
-            lieuNaissance: finalData.lieuNaissance,
-            nationalite: finalData.nationalite,
-            profession: finalData.profession,
-            typeDocument: finalData.typeDocument,
-            numeroDocument: finalData.numeroDocument,
-            paysDelivrance: finalData.paysDelivrance,
-            dateDelivrance: finalData.dateDelivrance,
-            lieuDelivrance: finalData.lieuDelivrance,
-            dateExpiration: finalData.dateExpiration,
-            sexe: finalData.sexe,
-            nip: finalData.nip,
-            nomJeuneFille: finalData.nomJeuneFille,
-            lieuResidence: finalData.lieuResidence,
-            rectoImage: finalData.rectoImage,
-            versoImage: finalData.versoImage,
-            portrait: _scanData!.portrait,
-          );
-        }
+      if (finalData == null && _scanData != null) {
+        finalData = _scanData!.copyWith(documentVerso: versoFile);
       }
 
       if (!mounted) return;
       setState(() {
         _isScanning = false;
       });
-      _showRecap(finalData ?? _scanData!.copyWith(documentVerso: versoFile));
+      _showRecap(finalData);
     }
+  }
+
+  ScanResultData _mergeScanResults(
+      ScanResultData rectoData, ScanResultData versoResult, File versoFile) {
+    bool hasValue(String? v) => v != null && v.trim().isNotEmpty;
+
+    return ScanResultData(
+      nom: hasValue(rectoData.nom) ? rectoData.nom : versoResult.nom,
+      prenom: hasValue(rectoData.prenom) ? rectoData.prenom : versoResult.prenom,
+      dateNaissance: hasValue(rectoData.dateNaissance) ? rectoData.dateNaissance : versoResult.dateNaissance,
+      lieuNaissance: hasValue(rectoData.lieuNaissance) ? rectoData.lieuNaissance : versoResult.lieuNaissance,
+      nationalite: hasValue(rectoData.nationalite) ? rectoData.nationalite : versoResult.nationalite,
+      profession: hasValue(rectoData.profession) ? rectoData.profession : versoResult.profession,
+      typeDocument: hasValue(rectoData.typeDocument) ? rectoData.typeDocument : versoResult.typeDocument,
+      numeroDocument: hasValue(rectoData.numeroDocument) ? rectoData.numeroDocument : versoResult.numeroDocument,
+      paysDelivrance: hasValue(rectoData.paysDelivrance) ? rectoData.paysDelivrance : versoResult.paysDelivrance,
+      dateDelivrance: hasValue(rectoData.dateDelivrance) ? rectoData.dateDelivrance : versoResult.dateDelivrance,
+      lieuDelivrance: hasValue(rectoData.lieuDelivrance) ? rectoData.lieuDelivrance : versoResult.lieuDelivrance,
+      dateExpiration: hasValue(rectoData.dateExpiration) ? rectoData.dateExpiration : versoResult.dateExpiration,
+      sexe: hasValue(rectoData.sexe) ? rectoData.sexe : versoResult.sexe,
+      nip: hasValue(rectoData.nip) ? rectoData.nip : versoResult.nip,
+      nomJeuneFille: hasValue(rectoData.nomJeuneFille) ? rectoData.nomJeuneFille : versoResult.nomJeuneFille,
+      lieuResidence: hasValue(rectoData.lieuResidence) ? rectoData.lieuResidence : versoResult.lieuResidence,
+      rectoImage: rectoData.rectoImage,
+      versoImage: versoFile,
+      portrait: rectoData.portrait ?? versoResult.portrait,
+    );
   }
 
   void _showRecap(ScanResultData? data) {

@@ -42,6 +42,7 @@ class IkaVisiteApp extends StatelessWidget {
           return SyncProvider(
             ctx.read<ConnectivityProvider>(),
             () => auth.accessToken,
+            onUnauthorized: () async => auth.refreshAccessToken(),
           );
         }),
       ],

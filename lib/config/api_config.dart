@@ -30,6 +30,9 @@ class ApiConfig {
   static const String departements = '/api/entreprise/departements/';
   static const String personnel = '/api/entreprise/personnel/';
   static const String references = '/api/entreprise/references/';
+  static const String creneaux = '/api/entreprise/creneaux/';
+  static const String checkMode = '/api/visites/check-mode/';
   static const String visiteurs = '/api/visiteurs/';
   static const String visiteurSearch = '/api/visiteurs/search/';
 }
+ 

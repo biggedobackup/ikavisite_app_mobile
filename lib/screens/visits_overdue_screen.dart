@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../models/visit.dart';
 import '../providers/auth_provider.dart';
 import '../providers/visit_provider.dart';
+import '../providers/connectivity_provider.dart';
 import '../widgets/app_drawer.dart';
 import '../widgets/visit_card.dart';
 import '../widgets/terminate_visit_dialog.dart';
@@ -79,7 +80,11 @@ class _VisitsOverdueScreenState extends State<VisitsOverdueScreen> {
       );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(success ? 'Visite clôturée' : 'Erreur lors de la clôture'),
+          content: Text(success
+              ? (context.read<ConnectivityProvider>().isConnected
+                  ? 'Visite clôturée'
+                  : 'Visite clôturée localement, synchronisation en attente')
+              : 'Erreur lors de la clôture'),
           backgroundColor: success ? Colors.green : Colors.red,
         ));
       }

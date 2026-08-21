@@ -16,7 +16,9 @@ class DashboardProvider extends ChangeNotifier {
   bool _isLoading = false;
   String? _error;
 
-  DashboardProvider(this._connectivity);
+  DashboardProvider(this._connectivity) {
+    _connectivity.addListener(() => notifyListeners());
+  }
 
   DashboardStats? get stats => _stats;
   bool get isLoading => _isLoading;
@@ -36,20 +38,29 @@ class DashboardProvider extends ChangeNotifier {
   Future<void> loadStats(String token, {Future<bool> Function()? onUnauthorized}) async {
     _cancelToken?.cancel();
     _cancelToken = CancelToken();
-    
+
+    // 1. Afficher d'abord les données en cache SQLite
     final hasExistingData = _stats != null;
     if (!hasExistingData) {
-      _stats = null;
-      _isLoading = true;
+      final cached = await _db.getFirst('dashboard_cache');
+      if (cached != null) {
+        try {
+          final json = jsonDecode(cached['stats_json'] as String) as Map<String, dynamic>;
+          _stats = DashboardStats.fromJson(json);
+        } catch (_) {}
+      }
+      if (_stats == null) _isLoading = true;
       _error = null;
       notifyListeners();
     }
 
+    // 2. Rafraîchir silencieusement depuis le réseau si connecté
     if (_connectivity.isConnected) {
       try {
         _cancelToken!.throwIfCancelled();
-        _stats = await _dashboardService.getStats(token);
-        await _saveStatsToCache(_stats!);
+        final fresh = await _dashboardService.getStats(token);
+        _stats = fresh;
+        await _saveStatsToCache(fresh);
         _error = null;
       } catch (e) {
         debugPrint('Dashboard API error: $e');
@@ -65,29 +76,10 @@ class DashboardProvider extends ChangeNotifier {
           }
         }
 
-        final cached = await _db.getFirst('dashboard_cache');
-        if (cached != null) {
-          try {
-            final json = jsonDecode(cached['stats_json'] as String) as Map<String, dynamic>;
-            _stats = DashboardStats.fromJson(json);
-            _error = null;
-          } catch (_) {
-            _error = msg;
-          }
-        } else {
-          _error = msg;
-        }
+        if (_stats == null) _error = msg;
       }
     } else {
-      final cached = await _db.getFirst('dashboard_cache');
-      if (cached != null) {
-        try {
-          final json = jsonDecode(cached['stats_json'] as String) as Map<String, dynamic>;
-          _stats = DashboardStats.fromJson(json);
-        } catch (_) {
-          _error = 'Erreur de lecture des données en cache';
-        }
-      } else {
+      if (_stats == null) {
         _error = 'Aucune donnée en cache. Connectez-vous à Internet pour synchroniser.';
       }
     }

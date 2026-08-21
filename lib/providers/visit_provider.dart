@@ -423,26 +423,125 @@ class VisitProvider extends ChangeNotifier {
   // ── Visit CRUD ──
 
   Future<bool> updateVisite(String token, int visiteId, Map<String, dynamic> body, {Future<bool> Function()? onUnauthorized}) async {
-    if (_connectivity.isConnected) {
-      try {
-        await _visitService.updateVisite(token, visiteId, body);
-        await _db.delete('visit_detail_cache', where: 'id = ?', whereArgs: [visiteId]);
-        return true;
-      } catch (e) {
-        final msg = e.toString();
-        if ((msg.contains('401') || msg.contains('Unauthorized')) && onUnauthorized != null) {
-          final refreshed = await onUnauthorized();
-          if (refreshed) return await updateVisite(token, visiteId, body, onUnauthorized: null);
-        }
-        _error = msg;
-        notifyListeners();
-        return false;
+    try {
+      final existing = _findInLists(visiteId);
+      if (existing != null && existing.uuid.startsWith('local_')) {
+        return await _coalesceLocalUpdate(existing, body);
       }
+
+      body['_visite_id'] = visiteId;
+      final pendingId = await _db.insert('pending_sync', {
+        'action': 'update_visite',
+        'payload': jsonEncode(body),
+        'created_at': DateTime.now().toIso8601String(),
+        'status': 0,
+      });
+
+      await _updateVisitInLists(visiteId, body);
+      await _db.delete('visit_detail_cache', where: 'id = ?', whereArgs: [visiteId]);
+
+      if (_connectivity.isConnected) {
+        try {
+          final apiBody = Map<String, dynamic>.from(body)..remove('_visite_id');
+          await _visitService.updateVisite(token, visiteId, apiBody);
+          await _db.delete('pending_sync', where: 'id = ?', whereArgs: [pendingId]);
+        } catch (e) {
+          final msg = e.toString();
+          if ((msg.contains('401') || msg.contains('Unauthorized')) && onUnauthorized != null) {
+            final refreshed = await onUnauthorized();
+            if (refreshed) {
+              try {
+                final apiBody = Map<String, dynamic>.from(body)..remove('_visite_id');
+                await _visitService.updateVisite(token, visiteId, apiBody);
+                await _db.delete('pending_sync', where: 'id = ?', whereArgs: [pendingId]);
+              } catch (_) {}
+            }
+          }
+          debugPrint('[VisitProvider] Modification réseau échouée, en file d\'attente : $e');
+        }
+      }
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
     }
-    body['_visite_id'] = visiteId;
-    await _db.insert('pending_sync', {'action': 'update_visite', 'payload': jsonEncode(body), 'created_at': DateTime.now().toIso8601String(), 'status': 0});
-    await _db.delete('visit_detail_cache', where: 'id = ?', whereArgs: [visiteId]);
-    return true;
+  }
+
+  Future<bool> _coalesceLocalUpdate(Visit existing, Map<String, dynamic> body) async {
+    try {
+      final localId = int.tryParse(existing.uuid.substring(6));
+      if (localId == null) return false;
+
+      final rows = await _db.query('pending_sync', where: 'id = ?', whereArgs: [localId], limit: 1);
+      if (rows.isEmpty) return false;
+
+      final createPayload =
+          jsonDecode(rows.first['payload'] as String) as Map<String, dynamic>;
+      final editBody = Map<String, dynamic>.from(body)..remove('_visite_id');
+      createPayload.addAll(editBody);
+      await _db.update('pending_sync', {'payload': jsonEncode(createPayload)},
+          where: 'id = ?', whereArgs: [localId]);
+
+      await _updateVisitInLists(existing.id, body);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<void> _updateVisitInLists(int visiteId, Map<String, dynamic> body) async {
+    for (final state in _states.values) {
+      final idx = state.items.indexWhere((v) => v.id == visiteId);
+      if (idx == -1) continue;
+      final old = state.items[idx];
+      state.items[idx] = old.copyWith(
+        motif: body['motif'] as String? ?? old.motif,
+        observations: body['observations'] as String? ?? old.observations,
+        numeroBadge: body['numero_badge'] as String? ?? old.numeroBadge,
+        dateVisite: body['date_visite'] as String? ?? old.dateVisite,
+        heureArrivee: body['heure_arrivee'] as String? ?? old.heureArrivee,
+        dateExpiration: body['date_expiration'] as String? ?? old.dateExpiration,
+        typeVisiteId: body['type_visite_id'] as int? ?? old.typeVisiteId,
+        porteEntreeId: body['porte_entree_id'] as int? ?? old.porteEntreeId,
+        personnelId: body['personnel_id'] as int? ?? old.personnelId,
+        visiteur: _updatedVisiteur(old.visiteur, body),
+      );
+    }
+    for (final entry in _states.entries) {
+      await _saveToCache(entry.key, entry.value.page, entry.value.items, entry.value.count);
+    }
+  }
+
+  Visiteur? _updatedVisiteur(Visiteur? v, Map<String, dynamic> body) {
+    if (v == null) return v;
+    return Visiteur(
+      id: v.id,
+      uuid: v.uuid,
+      nom: body['v_nom'] as String? ?? v.nom,
+      prenom: body['v_prenom'] as String? ?? v.prenom,
+      genre: body['v_genre'] as String? ?? v.genre,
+      telephone: body['v_telephone'] as String? ?? v.telephone,
+      email: body['v_email'] as String? ?? v.email,
+      numeroPiece: body['v_numero_piece'] as String? ?? v.numeroPiece,
+      numeroNip: body['v_nip'] as String? ?? v.numeroNip,
+      nationalite: body['v_nationalite'] as String? ?? v.nationalite,
+      profession: body['v_profession'] as String? ?? v.profession,
+      adresse: body['v_adresse'] as String? ?? v.adresse,
+      pieceIdentite: body['v_piece_identite'] as String? ?? v.pieceIdentite,
+      dateNaissance: body['v_date_naissance'] as String? ?? v.dateNaissance,
+      lieuNaissance: body['v_lieu_naissance'] as String? ?? v.lieuNaissance,
+      paysDelivrance: body['v_pays_delivrance'] as String? ?? v.paysDelivrance,
+      dateDelivrance: body['v_date_delivrance'] as String? ?? v.dateDelivrance,
+      photo: v.photo,
+      documentRecto: v.documentRecto,
+      documentVerso: v.documentVerso,
+      statut: v.statut,
+    );
   }
 
   Future<void> createVisite(String token, Map<String, dynamic> body, {Future<bool> Function()? onUnauthorized}) async {
@@ -453,28 +552,147 @@ class VisitProvider extends ChangeNotifier {
       'status': 0,
     });
 
+    await _addLocalPendingVisit(pendingId, body);
+
     if (_connectivity.isConnected) {
-      _tryCreateOnline(token, body, pendingId, onUnauthorized);
+      _tryCreateOnline(token, pendingId, onUnauthorized);
     }
   }
 
-  Future<void> _tryCreateOnline(String token, Map<String, dynamic> body, int pendingId,
+  Future<void> _addLocalPendingVisit(int pendingId, Map<String, dynamic> body) async {
+    final uuid = 'local_$pendingId';
+    final now = DateTime.now();
+    final dateVisite = body['date_visite'] as String? ??
+        '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+
+    final visit = Visit(
+      id: -pendingId,
+      uuid: uuid,
+      statut: (body['statut'] as String?) ?? 'EN_COURS',
+      genre: body['genre'] as String?,
+      typeVisiteId: body['type_visite_id'] as int?,
+      porteEntreeId: body['porte_entree_id'] as int?,
+      personnelId: body['personnel_id'] as int?,
+      dateVisite: dateVisite,
+      heureArrivee: (body['heure_arrivee'] as String?) ?? '00:00',
+      dateExpiration: body['date_expiration'] as String?,
+      numeroBadge: body['numero_badge'] as String?,
+      motif: body['motif'] as String?,
+      observations: body['observations'] as String?,
+      signatureEntree: body['signature_entree'] as String?,
+      visiteur: Visiteur(
+        id: -pendingId,
+        uuid: uuid,
+        nom: body['v_nom'] as String?,
+        prenom: body['v_prenom'] as String?,
+        genre: body['v_genre'] as String? ?? body['genre'] as String?,
+        telephone: body['v_telephone'] as String?,
+        email: body['v_email'] as String?,
+        numeroPiece: body['v_numero_piece'] as String?,
+        numeroNip: body['v_nip'] as String?,
+        nationalite: body['v_nationalite'] as String?,
+        profession: body['v_profession'] as String?,
+        adresse: body['v_adresse'] as String?,
+        pieceIdentite: body['v_piece_identite'] as String?,
+        dateNaissance: body['v_date_naissance'] as String?,
+        lieuNaissance: body['v_lieu_naissance'] as String?,
+        paysDelivrance: body['v_pays_delivrance'] as String?,
+        dateDelivrance: body['v_date_delivrance'] as String?,
+        photo: body['photo_base64'] as String?,
+        documentRecto: body['document_recto_base64'] as String?,
+        documentVerso: body['document_verso_base64'] as String?,
+      ),
+    );
+
+    final enCours = _states[_enCoursKey]!;
+    enCours.items.insert(0, visit);
+    enCours.count++;
+    await _saveToCache('en_cours', enCours.page, enCours.items, enCours.count);
+
+    if (_isToday(dateVisite)) {
+      final todayState = _states[_todayKey]!;
+      todayState.items.insert(0, visit);
+      todayState.count++;
+      await _saveToCache('today_v2', todayState.page, todayState.items, todayState.count);
+    }
+    notifyListeners();
+  }
+
+  bool _isToday(String dateVisite) {
+    final now = DateTime.now();
+    final d = DateTime.tryParse(dateVisite);
+    if (d == null) return false;
+    return d.year == now.year && d.month == now.month && d.day == now.day;
+  }
+
+  Future<void> _tryCreateOnline(String token, int pendingId,
       Future<bool> Function()? onUnauthorized) async {
     try {
-      final visit = await _visitService.createVisite(token, body);
-      await _addCreatedVisit(visit);
+      final rows = await _db.query('pending_sync',
+          where: 'id = ?', whereArgs: [pendingId], limit: 1);
+      if (rows.isEmpty) return;
+
+      final payload = jsonDecode(rows.first['payload'] as String) as Map<String, dynamic>;
+      final terminerApres = payload.remove('_terminer_apres_creation') == true;
+      final terminationBody = payload.remove('_termination_body') as Map<String, dynamic>?;
+
+      final visit = await _visitService.createVisite(token, payload);
+
+      if (terminerApres) {
+        try {
+          await _visitService.terminerVisite(token, visit.id, body: terminationBody);
+        } catch (e) {
+          debugPrint('[VisitProvider] Clôture après création échouée, rejetée : $e');
+          await _db.insert('pending_sync', {
+            'action': 'terminer_visite',
+            'payload': jsonEncode({
+              '_visite_id': visit.id,
+              ...?terminationBody,
+            }),
+            'created_at': DateTime.now().toIso8601String(),
+            'status': 0,
+          });
+        }
+        await _replacePendingVisitWithTerminated(pendingId, visit);
+      } else {
+        await _replacePendingVisit(pendingId, visit);
+      }
       await _db.delete('pending_sync', where: 'id = ?', whereArgs: [pendingId]);
     } catch (e) {
       final msg = e.toString();
       if ((msg.contains('401') || msg.contains('Unauthorized')) && onUnauthorized != null) {
         final refreshed = await onUnauthorized();
         if (refreshed) {
-          _tryCreateOnline(token, body, pendingId, null);
+          _tryCreateOnline(token, pendingId, null);
           return;
         }
       }
       debugPrint('[VisitProvider] Création en arrière-plan échouée, en file d\'attente : $e');
     }
+  }
+
+  Future<void> _replacePendingVisit(int pendingId, Visit visit) async {
+    final localUuid = 'local_$pendingId';
+    for (final state in _states.values) {
+      final before = state.items.length;
+      state.items.removeWhere((v) => v.uuid == localUuid);
+      if (state.items.length != before && state.count > 0) state.count--;
+    }
+    await _addCreatedVisit(visit);
+  }
+
+  Future<void> _replacePendingVisitWithTerminated(int pendingId, Visit visit) async {
+    final localUuid = 'local_$pendingId';
+    for (final state in _states.values) {
+      final before = state.items.length;
+      state.items.removeWhere((v) => v.uuid == localUuid);
+      if (state.items.length != before && state.count > 0) state.count--;
+    }
+    final terminees = _states[_termineesKey]!;
+    terminees.items.insert(0, visit.copyWith(statut: 'TERMINEE'));
+    terminees.count++;
+    await _saveToCache('terminees', terminees.page, terminees.items, terminees.count);
+    notifyListeners();
   }
 
   Future<void> _addCreatedVisit(Visit visit) async {
@@ -499,6 +717,71 @@ class VisitProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<bool> _terminerLocalPending(Visit visit, {Map<String, dynamic>? body}) async {
+    try {
+      final localId = int.tryParse(visit.uuid.substring(6));
+
+      for (final key in [_enCoursKey, _excedeesKey, _todayKey]) {
+        final state = _states[key]!;
+        final before = state.items.length;
+        state.items.removeWhere((v) => v.uuid == visit.uuid);
+        if (state.items.length != before && state.count > 0) state.count--;
+      }
+
+      final terminees = _states[_termineesKey]!;
+      terminees.items.insert(0, visit.copyWith(statut: 'TERMINEE'));
+      terminees.count++;
+
+      await _saveToCache('en_cours', _states[_enCoursKey]!.page, _states[_enCoursKey]!.items, _states[_enCoursKey]!.count);
+      await _saveToCache('excedees', _states[_excedeesKey]!.page, _states[_excedeesKey]!.items, _states[_excedeesKey]!.count);
+      await _saveToCache('today_v2', _states[_todayKey]!.page, _states[_todayKey]!.items, _states[_todayKey]!.count);
+      await _saveToCache('terminees', terminees.page, terminees.items, terminees.count);
+
+      if (localId != null) {
+        final rows = await _db.query('pending_sync', where: 'id = ?', whereArgs: [localId], limit: 1);
+        if (rows.isNotEmpty) {
+          final createPayload = jsonDecode(rows.first['payload'] as String) as Map<String, dynamic>;
+          createPayload['_terminer_apres_creation'] = true;
+          createPayload['_termination_body'] = body ?? {};
+          await _db.update('pending_sync', {'payload': jsonEncode(createPayload)},
+              where: 'id = ?', whereArgs: [localId]);
+        }
+      }
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<int> getLocalPendingVisitsCount() async {
+    final state = _states[_enCoursKey]!;
+    if (state.items.isNotEmpty) {
+      return state.items.where((v) => v.uuid.startsWith('local_')).length;
+    }
+    final cached = await _loadFromCache('en_cours', 1);
+    if (cached == null) return 0;
+    return _parseVisits(cached['items'])
+        .where((v) => v.uuid.startsWith('local_'))
+        .length;
+  }
+
+  Future<void> removeLocalPendingVisit(int pendingId) async {
+    final localUuid = 'local_$pendingId';
+    for (final key in [_enCoursKey, _excedeesKey, _todayKey, _termineesKey]) {
+      final state = _states[key]!;
+      final before = state.items.length;
+      state.items.removeWhere((v) => v.uuid == localUuid);
+      if (state.items.length != before && state.count > 0) state.count--;
+    }
+    for (final entry in _states.entries) {
+      await _saveToCache(entry.key, entry.value.page, entry.value.items, entry.value.count);
+    }
+    notifyListeners();
+  }
+
   // ── Sync ──
 
   Future<List<Map<String, dynamic>>> getPendingSyncItems() async {
@@ -511,35 +794,61 @@ class VisitProvider extends ChangeNotifier {
 
   Future<bool> terminerVisite(String token, int visiteId, {Map<String, dynamic>? body, Future<bool> Function()? onUnauthorized}) async {
     try {
-      await _visitService.terminerVisite(token, visiteId, body: body);
+      final pendingVisit = _findInLists(visiteId);
+      if (pendingVisit != null && pendingVisit.uuid.startsWith('local_')) {
+        return await _terminerLocalPending(pendingVisit, body: body);
+      }
+
+      final payload = Map<String, dynamic>.from(body ?? {})..['_visite_id'] = visiteId;
+      final pendingId = await _db.insert('pending_sync', {
+        'action': 'terminer_visite',
+        'payload': jsonEncode(payload),
+        'created_at': DateTime.now().toIso8601String(),
+        'status': 0,
+      });
+
       final visit = _findInLists(visiteId);
 
       for (final key in [_enCoursKey, _excedeesKey, _todayKey]) {
         final state = _states[key]!;
         state.items.removeWhere((v) => v.id == visiteId);
-        state.count = state.count.clamp(0, 999999);
+        if (state.count > 0) state.count--;
       }
 
       if (visit != null) {
         final terminees = _states[_termineesKey]!;
         terminees.items.insert(0, visit.copyWith(statut: 'TERMINEE'));
         terminees.count++;
-        await _saveToCache('terminees', terminees.page, terminees.items, terminees.count);
       }
 
-      await _db.delete('visit_detail_cache', where: 'id = ?', whereArgs: [visiteId]);
       await _saveToCache('en_cours', _states[_enCoursKey]!.page, _states[_enCoursKey]!.items, _states[_enCoursKey]!.count);
       await _saveToCache('excedees', _states[_excedeesKey]!.page, _states[_excedeesKey]!.items, _states[_excedeesKey]!.count);
       await _saveToCache('today_v2', _states[_todayKey]!.page, _states[_todayKey]!.items, _states[_todayKey]!.count);
+      await _saveToCache('terminees', _states[_termineesKey]!.page, _states[_termineesKey]!.items, _states[_termineesKey]!.count);
+      await _db.delete('visit_detail_cache', where: 'id = ?', whereArgs: [visiteId]);
       notifyListeners();
+
+      if (_connectivity.isConnected) {
+        try {
+          await _visitService.terminerVisite(token, visiteId, body: body);
+          await _db.delete('pending_sync', where: 'id = ?', whereArgs: [pendingId]);
+        } catch (e) {
+          final msg = e.toString();
+          if ((msg.contains('401') || msg.contains('Unauthorized')) && onUnauthorized != null) {
+            final refreshed = await onUnauthorized();
+            if (refreshed) {
+              try {
+                await _visitService.terminerVisite(token, visiteId, body: body);
+                await _db.delete('pending_sync', where: 'id = ?', whereArgs: [pendingId]);
+              } catch (_) {}
+            }
+          }
+          debugPrint('[VisitProvider] Clôture réseau échouée, en file d\'attente : $e');
+        }
+      }
       return true;
     } catch (e) {
-      final msg = e.toString();
-      if ((msg.contains('401') || msg.contains('Unauthorized')) && onUnauthorized != null) {
-        final refreshed = await onUnauthorized();
-        if (refreshed) return await terminerVisite(token, visiteId, body: body, onUnauthorized: null);
-      }
-      _error = msg;
+      _error = e.toString();
       notifyListeners();
       return false;
     }

@@ -8,6 +8,7 @@ import '../providers/sync_provider.dart';
 import '../models/dashboard_stats.dart';
 import '../widgets/app_drawer.dart';
 import '../widgets/skeleton_loader.dart';
+import '../widgets/pending_sync_dialog.dart';
 import '../services/local_ocr_service.dart';
 import 'scan.dart';
 
@@ -30,6 +31,7 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
   static const Color kBlueSoft = Color(0xFFEFF6FF);
 
   late DashboardProvider _dashboardProvider;
+  int _localPendingCount = 0;
 
   @override
   void initState() {
@@ -69,7 +71,7 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
     _loadStats();
   }
 
-  void _loadStats() {
+void _loadStats() {
     final auth = context.read<AuthProvider>();
     if (!auth.isLoggedIn) return;
     final t = auth.accessToken;
@@ -81,6 +83,14 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
       context.read<VisitProvider>().prefetchAndCacheDropdowns(t);
     }
     context.read<SyncProvider>().refreshPendingCount();
+    _refreshLocalPendingCount();
+  }
+
+  Future<void> _refreshLocalPendingCount() async {
+    final n = await context.read<VisitProvider>().getLocalPendingVisitsCount();
+    if (mounted && n != _localPendingCount) {
+      setState(() => _localPendingCount = n);
+    }
   }
 
   Color _toneColor(String tone) {
@@ -196,33 +206,9 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
                   const SliverToBoxAdapter(child: SizedBox(height: 16)),
                   SliverToBoxAdapter(child: _buildSectionTitle('Statistiques')),
                   const SliverToBoxAdapter(child: SizedBox(height: 12)),
-                  _buildStatsSliverGrid(stats.stats),
+                  _buildStatsSliverGrid(stats.stats, extraEnCours: _localPendingCount),
                   const SliverToBoxAdapter(child: SizedBox(height: 28)),
                   SliverToBoxAdapter(child: _buildActionButtons()),
-                  if (stats.showChartVisitsByDepartment) ...[
-                    const SliverToBoxAdapter(child: SizedBox(height: 22)),
-                    SliverToBoxAdapter(child: _buildSectionTitle('Visites par département')),
-                    const SliverToBoxAdapter(child: SizedBox(height: 12)),
-                    SliverToBoxAdapter(child: _buildBarChart(stats.visitsByDepartment)),
-                  ],
-                  if (stats.showChartVisitsByDay) ...[
-                    const SliverToBoxAdapter(child: SizedBox(height: 22)),
-                    SliverToBoxAdapter(child: _buildSectionTitle('Visites par jour')),
-                    const SliverToBoxAdapter(child: SizedBox(height: 12)),
-                    SliverToBoxAdapter(child: _buildBarChart(stats.visitsByDay)),
-                  ],
-                  if (stats.showChartVisitsByEntryPoint) ...[
-                    const SliverToBoxAdapter(child: SizedBox(height: 22)),
-                    SliverToBoxAdapter(child: _buildSectionTitle('Entrées')),
-                    const SliverToBoxAdapter(child: SizedBox(height: 12)),
-                    SliverToBoxAdapter(child: _buildBarChart(stats.visitsByEntryPoint)),
-                  ],
-                  if (stats.showChartVisitTypes) ...[
-                    const SliverToBoxAdapter(child: SizedBox(height: 22)),
-                    SliverToBoxAdapter(child: _buildSectionTitle('Types de visite')),
-                    const SliverToBoxAdapter(child: SizedBox(height: 12)),
-                    SliverToBoxAdapter(child: _buildPieChart(stats.visitTypes)),
-                  ],
                   const SliverToBoxAdapter(child: SizedBox(height: 24)),
                 ],
               ),
@@ -314,6 +300,29 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
                   child: Text(msg,
                       style: const TextStyle(fontSize: 12.5, color: Color(0xFF9A3412))),
                 ),
+                if (count > 0)
+                  TextButton(
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFF9A3412),
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    onPressed: () => PendingSyncDialog.show(
+                      context,
+                      provider: syncProv,
+                      onDelete: (id, action) async {
+                        final syncProvider = context.read<SyncProvider>();
+                        final visitProvider = context.read<VisitProvider>();
+                        await syncProvider.removePendingItem(id);
+                        if (action == 'create_visite') {
+                          await visitProvider.removeLocalPendingVisit(id);
+                        }
+                        await _refreshLocalPendingCount();
+                        syncProvider.refreshPendingCount();
+                      },
+                    ),
+                    child: const Text('Gérer', style: TextStyle(fontSize: 12)),
+                  ),
               ],
             ),
           );
@@ -342,6 +351,14 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
     );
   }
 
+  String _toneForStat(String icon, String label, String tone) {
+    final l = label.toLowerCase();
+    if (l.contains('cours')) return 'success';
+    if (l.contains('excéd') || l.contains('exced')) return 'danger';
+    if (icon == 'check' || l.contains('termin')) return 'danger';
+    return tone;
+  }
+
   String? _getScreenFromIconOrLabel(String icon, String label) {
     final l = label.toLowerCase();
     if (icon == 'today' || l.contains('jour')) return 'visits-today';
@@ -351,7 +368,7 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
     return null;
   }
 
-  Widget _buildStatsSliverGrid(List<StatItem> items) {
+  Widget _buildStatsSliverGrid(List<StatItem> items, {int extraEnCours = 0}) {
     return SliverGrid(
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 2,
@@ -363,8 +380,12 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
         (_, i) {
           final item = items[i];
           final screen = item.screen ?? _getScreenFromIconOrLabel(item.icon, item.label);
+          final tone = _toneForStat(item.icon, item.label, item.tone);
+          final value = screen == 'visits-in-progress'
+              ? item.value + extraEnCours
+              : item.value;
           return _buildStatCard(
-            item.icon, item.tone, item.label, item.value, item.sub,
+            item.icon, tone, item.label, value, item.sub,
             onTap: screen != null ? () => _navigateToScreen(screen) : null,
           );
         },
@@ -502,126 +523,5 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
         ),
       ],
     );
-  }
-
-  Widget _buildBarChart(List<BarChartItem> items) {
-    if (items.isEmpty) return const SizedBox.shrink();
-
-    final maxValue = items.fold<int>(0, (max, e) => e.value > max ? e.value : max);
-
-    return Container(
-      width: double.infinity,
-      decoration: BoxDecoration(
-        color: kCard,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: kBorder),
-        boxShadow: [
-          BoxShadow(
-            color: kIkaBlue.withValues(alpha: 0.05),
-            blurRadius: 16,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: items.take(7).map((item) {
-            final ratio = maxValue > 0 ? item.value / maxValue : 0.0;
-            return Padding(
-              padding: const EdgeInsets.symmetric(vertical: 5),
-              child: Row(
-                children: [
-                  SizedBox(
-                    width: 110,
-                    child: Text(item.label,
-                        style: const TextStyle(fontSize: 12.5, color: kText),
-                        overflow: TextOverflow.ellipsis),
-                  ),
-                  Expanded(
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(7),
-                      child: LinearProgressIndicator(
-                        value: ratio,
-                        minHeight: 20,
-                        backgroundColor: kInputBg,
-                        valueColor:
-                            AlwaysStoppedAnimation<Color>(kIkaBlue.withValues(alpha: 0.85)),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  SizedBox(
-                    width: 48,
-                    child: Text('${item.value}',
-                        style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                            color: kText),
-                        textAlign: TextAlign.right),
-                  ),
-                ],
-              ),
-            );
-          }).toList(),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildPieChart(List<PieChartItem> items) {
-    if (items.isEmpty) return const SizedBox.shrink();
-
-    return Container(
-      width: double.infinity,
-      decoration: BoxDecoration(
-        color: kCard,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: kBorder),
-        boxShadow: [
-          BoxShadow(
-            color: kIkaBlue.withValues(alpha: 0.05),
-            blurRadius: 16,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: items.map((item) {
-            return Padding(
-              padding: const EdgeInsets.symmetric(vertical: 5),
-              child: Row(
-                children: [
-                  Container(
-                    width: 14,
-                    height: 14,
-                    decoration: BoxDecoration(
-                      color: _parseColor(item.color),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(item.label,
-                        style: const TextStyle(fontSize: 12.5, color: kText)),
-                  ),
-                  Text('${item.value}',
-                      style: const TextStyle(
-                          fontSize: 13, fontWeight: FontWeight.w700, color: kText)),
-                ],
-              ),
-            );
-          }).toList(),
-        ),
-      ),
-    );
-  }
-
-  Color _parseColor(String hex) {
-    hex = hex.replaceFirst('#', '');
-    if (hex.length == 6) hex = 'FF$hex';
-    return Color(int.parse(hex, radix: 16));
   }
 }

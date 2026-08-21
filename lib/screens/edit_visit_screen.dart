@@ -331,9 +331,18 @@ class _EditVisitScreenState extends State<EditVisitScreen> {
 
       final success = await context.read<VisitProvider>().updateVisite(t, widget.visiteId, body);
       if (mounted) {
+        final online = context.read<ConnectivityProvider>().isConnected;
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(success ? 'Visite modifiée avec succès' : 'Modification enregistrée localement, synchronisation en attente'),
-          backgroundColor: success ? Colors.green : Colors.orange,
+          content: Text(!success
+              ? 'Échec de l\'enregistrement local'
+              : online
+                  ? 'Visite modifiée avec succès'
+                  : 'Modification enregistrée localement, synchronisation en attente'),
+          backgroundColor: !success
+              ? Colors.red
+              : online
+                  ? Colors.green
+                  : Colors.orange,
         ));
         Navigator.pop(context, true);
       }

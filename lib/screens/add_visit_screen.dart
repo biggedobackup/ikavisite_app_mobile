@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
@@ -53,11 +54,23 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
   String? _selectedNationalite;
   String? _selectedPays;
   String? _selectedTypePiece;
+  bool _isHorsNormes = true;
+  Timer? _visitorLookupDebounce;
+
+  List<Map<String, dynamic>> get _filteredPersonnel {
+    if (_selectedDepartementId == null) return [];
+    return _personnel.where((p) {
+      final did = p['departement_id'];
+      final didInt = did is int ? did : int.tryParse(did?.toString() ?? '');
+      return didInt == _selectedDepartementId;
+    }).toList();
+  }
 
   List<Map<String, dynamic>> _typesVisite = [];
   List<Map<String, dynamic>> _portesEntree = [];
   List<Map<String, dynamic>> _personnel = [];
   List<Map<String, dynamic>> _departements = [];
+  List<Map<String, dynamic>> _creneaux = [];
   List<String> _nationalites = [];
   List<String> _pays = [];
   List<String> _typesPiece = [];
@@ -82,7 +95,12 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
     );
     _initArrivee();
     _fillFromScanData();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _loadDropdowns());
+    _numeroPieceCtrl.addListener(_scheduleVisitorLookup);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadDropdowns();
+      _checkVisitMode();
+      _scheduleVisitorLookup();
+    });
   }
 
   void _fillFromScanData() {
@@ -95,7 +113,6 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
     if (data.profession != null) _professionCtrl.text = data.profession!;
     if (data.numeroDocument != null) _numeroPieceCtrl.text = data.numeroDocument!;
     if (data.dateDelivrance != null) _dateDelivranceCtrl.text = data.dateDelivrance!;
-    if (data.lieuDelivrance != null) _adresseCtrl.text = data.lieuDelivrance!;
     if (data.dateExpiration != null) _dateExpirationCtrl.text = data.dateExpiration!;
     if (data.nip != null) _nipCtrl.text = data.nip!;
     if (data.sexe != null) _selectedGenre = data.sexe;
@@ -163,6 +180,7 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
 
   @override
   void dispose() {
+    _visitorLookupDebounce?.cancel();
     _nomCtrl.dispose();
     _prenomCtrl.dispose();
     _telephoneCtrl.dispose();
@@ -202,7 +220,11 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
         // Matching approximatif des valeurs du scan dans les dropdowns
         _selectedNationalite = _matchDropdownValue(_nationalites, _scanNationalite) ?? _selectedNationalite;
         _selectedPays = _matchDropdownValue(_pays, _scanPays) ?? _selectedPays;
-        _selectedTypePiece = _matchDropdownValue(_typesPiece, _scanTypePiece) ?? _selectedTypePiece;
+        _selectedTypePiece ??= _matchDropdownValue(_typesPiece, _scanTypePiece);
+        if (_selectedPorteEntreeId == null && _portesEntree.isNotEmpty) {
+          final firstId = _portesEntree.first['id'];
+          _selectedPorteEntreeId = firstId is int ? firstId : int.tryParse(firstId.toString());
+        }
       });
     }
 
@@ -217,6 +239,7 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
           _service.getPersonnel(t),
           _service.getDepartements(t),
           _service.getReferences(t),
+          _service.getCreneaux(t),
         ]);
         if (mounted) {
           setState(() {
@@ -225,6 +248,7 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
             _personnel = results[2] as List<Map<String, dynamic>>;
             _departements = results[3] as List<Map<String, dynamic>>;
             final refs = results[4] as Map<String, dynamic>;
+            _creneaux = results[5] as List<Map<String, dynamic>>;
             _nationalites = (refs['nationalites'] as List?)?.cast<String>() ?? [];
             _pays = (refs['pays'] as List?)?.cast<String>() ?? [];
             _typesPiece = (refs['types_piece'] as List?)?.cast<String>() ?? [];
@@ -233,7 +257,11 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
             // Recalculer les valeurs du scan correspondantes
             _selectedNationalite = _matchDropdownValue(_nationalites, _scanNationalite) ?? _selectedNationalite;
             _selectedPays = _matchDropdownValue(_pays, _scanPays) ?? _selectedPays;
-            _selectedTypePiece = _matchDropdownValue(_typesPiece, _scanTypePiece) ?? _selectedTypePiece;
+            _selectedTypePiece ??= _matchDropdownValue(_typesPiece, _scanTypePiece);
+            if (_selectedPorteEntreeId == null && _portesEntree.isNotEmpty) {
+              final firstId = _portesEntree.first['id'];
+              _selectedPorteEntreeId = firstId is int ? firstId : int.tryParse(firstId.toString());
+            }
 
             _loadingDropdowns = false;
           });
@@ -279,6 +307,7 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
           'pays': _pays,
           'types_piece': _typesPiece,
         }),
+        'creneaux': jsonEncode(_creneaux),
       };
 
       await db.transaction((txn) async {
@@ -334,6 +363,12 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
           _pays = (data['pays'] as List?)?.cast<String>() ?? [];
           _typesPiece = (data['types_piece'] as List?)?.cast<String>() ?? [];
           _dureeMoyenneVisites = data['duree_moyenne_visites'] as int? ?? 60;
+      }
+      final cren = await db.getFirst('dropdown_cache',
+          where: 'cache_key = ?', whereArgs: ['creneaux']);
+      if (cren != null) {
+        _creneaux = (jsonDecode(cren['data_json'] as String) as List)
+            .cast<Map<String, dynamic>>();
       }
     } catch (e) {
       debugPrint('Error loading dropdowns from cache: $e');
@@ -410,6 +445,7 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
     final dt = DateTime(date.year, date.month, date.day, time.hour, time.minute);
     _arriveeCtrl.text = '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
     _updateDepartPrevue();
+    _checkVisitMode();
   }
 
   void _updateDepartPrevue() {
@@ -430,6 +466,60 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
     _departPrevuCtrl.text = '${dep.year}-${dep.month.toString().padLeft(2, '0')}-${dep.day.toString().padLeft(2, '0')} ${dep.hour.toString().padLeft(2, '0')}:${dep.minute.toString().padLeft(2, '0')}';
   }
 
+  Future<void> _checkVisitMode() async {
+    final parts = _arriveeCtrl.text.split(' ');
+    if (parts.length != 2) return;
+    final t = _getToken();
+    if (t == null) return;
+    try {
+      final mode = await _service.checkMode(t, date: parts[0], heure: parts[1]);
+      if (!mounted) return;
+      setState(() => _isHorsNormes = mode['mode'] == 'HORS_NORMES');
+    } catch (e) {
+      debugPrint('[AddVisitScreen] check-mode indisponible (mode inconnu): $e');
+    }
+  }
+
+  void _scheduleVisitorLookup() {
+    _visitorLookupDebounce?.cancel();
+    _visitorLookupDebounce = Timer(const Duration(milliseconds: 400), _lookupVisitor);
+  }
+
+  Future<void> _lookupVisitor() async {
+    final number = _numeroPieceCtrl.text.trim();
+    if (number.isEmpty) return;
+    if (!(context.read<ConnectivityProvider>().isConnected)) return;
+    final t = _getToken();
+    if (t == null) return;
+    try {
+      final results = await _service.searchVisiteurs(t, query: number);
+      if (!mounted || results.isEmpty) return;
+      Map<String, dynamic> best = results.first;
+      final upper = number.toUpperCase();
+      for (final v in results) {
+        final np = (v['numero_piece'] as String?)?.toUpperCase();
+        final nip = (v['numero_nip'] as String?)?.toUpperCase();
+        if (np == upper || nip == upper) {
+          best = v;
+          break;
+        }
+      }
+      setState(() {
+        final phone = best['telephone'] as String?;
+        if (phone != null && phone.trim().isNotEmpty && _telephoneCtrl.text.trim().isEmpty) {
+          _telephoneCtrl.text = phone;
+        }
+        final nat = best['nationalite'] as String?;
+        if (nat != null && nat.trim().isNotEmpty && _selectedNationalite == null) {
+          final matched = _matchDropdownValue(_nationalites, nat);
+          if (matched != null) _selectedNationalite = matched;
+        }
+      });
+    } catch (e) {
+      debugPrint('[AddVisitScreen] Recherche visiteur indisponible: $e');
+    }
+  }
+
   Future<String?> _fileToBase64(String? path) async {
     if (path == null) return null;
     return compute(_encodeFileToBase64, path);
@@ -440,8 +530,58 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
     return 'data:image/png;base64,${base64Encode(bytes)}';
   }
 
+  String? _required(String? v) => (v == null || v.trim().isEmpty) ? 'Ce champ est obligatoire' : null;
+  String? _requiredSelection(String? v) => (v == null || v.isEmpty) ? 'Veuillez selectionner une valeur' : null;
+  String? _requiredDateTime(String? v) {
+    if (v == null || v.trim().isEmpty) return 'Ce champ est obligatoire';
+    if (v.length < 16) return 'Format de date invalide';
+    return null;
+  }
+
+  static const List<String> _joursSemaine = ['LUNDI','MARDI','MERCREDI','JEUDI','VENDREDI','SAMEDI','DIMANCHE'];
+
+  String? _validateCreneau() {
+    if (_creneaux.isEmpty) return null;
+    final parts = _arriveeCtrl.text.split(' ');
+    if (parts.length != 2) return 'Format de date d\'arrivee invalide';
+    final dateParts = parts[0].split('-');
+    final timeParts = parts[1].split(':');
+    if (dateParts.length != 3 || timeParts.length < 2) return 'Format de date d\'arrivee invalide';
+    final dt = DateTime(
+      int.parse(dateParts[0]),
+      int.parse(dateParts[1]),
+      int.parse(dateParts[2]),
+      int.parse(timeParts[0]),
+      int.parse(timeParts[1]),
+    );
+    final jour = _joursSemaine[dt.weekday - 1];
+    final heureArrivee = '${timeParts[0]}:${timeParts[1]}';
+    final actifs = _creneaux.where((c) =>
+      c['jour_semaine'] == jour &&
+      c['statut'] == 'ACTIF' &&
+      c['heure_debut'] != null &&
+      c['heure_fin'] != null &&
+      (c['heure_debut'] as String).compareTo(heureArrivee) <= 0 &&
+      (c['heure_fin'] as String).compareTo(heureArrivee) >= 0,
+    );
+    if (actifs.isEmpty) {
+      return 'Aucun creneau actif pour $jour a $heureArrivee';
+    }
+    return null;
+  }
+
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
+
+    final creneauError = _validateCreneau();
+    if (creneauError != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(creneauError),
+        backgroundColor: Colors.red,
+      ));
+      return;
+    }
+
     final t = _getToken();
     if (t == null) return;
 
@@ -493,11 +633,6 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
       if (recto != null) body['document_recto_base64'] = recto;
       final verso = await _fileToBase64(_docVersoPath);
       if (verso != null) body['document_verso_base64'] = verso;
-
-      if (_signatureController.value.isNotEmpty) {
-        final sigBytes = await _signatureController.toPngBytes();
-        if (sigBytes != null) body['signature_entree'] = 'data:image/png;base64,${base64Encode(sigBytes)}';
-      }
 
       await provider.createVisite(t, body);
 
@@ -555,19 +690,19 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
                     _buildSectionTitle('Informations du visiteur'),
                     const SizedBox(height: 8),
                     _buildCard([
-                      _buildField('Nom *', _nomCtrl, icon: Icons.person),
+                      _buildField('Nom *', _nomCtrl, icon: Icons.person, validator: _required),
                       const SizedBox(height: 12),
-                      _buildField('Prénom *', _prenomCtrl, icon: Icons.person_outline),
+                      _buildField('Prénom *', _prenomCtrl, icon: Icons.person_outline, validator: _required),
                       const SizedBox(height: 12),
-                      _buildDropdownSimple('Genre *', ['HOMME', 'FEMME'], _selectedGenre, (v) => setState(() => _selectedGenre = v)),
+                      _buildDropdownSimple('Genre *', ['HOMME', 'FEMME'], _selectedGenre, (v) => setState(() => _selectedGenre = v), validator: _requiredSelection),
                       const SizedBox(height: 12),
                       _buildDropdownSearch('Pays de delivrance', _pays, _selectedPays, (v) => setState(() => _selectedPays = v)),
                       const SizedBox(height: 12),
-                      _buildDropdownSearch('Type de pièce *', _typesPiece, _selectedTypePiece, (v) => setState(() => _selectedTypePiece = v)),
+                      _buildDropdownSearch('Type de pièce *', _typesPiece, _selectedTypePiece, (v) => setState(() => _selectedTypePiece = v), validator: _requiredSelection),
                       const SizedBox(height: 12),
                       _buildField('Profession', _professionCtrl, icon: Icons.work),
                       const SizedBox(height: 12),
-                      _buildField('N° Pièce *', _numeroPieceCtrl, icon: Icons.badge),
+                      _buildField('N° Pièce *', _numeroPieceCtrl, icon: Icons.badge, validator: _required),
                       const SizedBox(height: 12),
                       _buildField('NIP', _nipCtrl, icon: Icons.credit_card),
                       const SizedBox(height: 12),
@@ -593,35 +728,49 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
                     const SizedBox(height: 8),
                     _buildCard([
                       _buildDropdown('Type de visite', _typesVisite, _selectedTypeVisiteId, 'nom', (v) => setState(() => _selectedTypeVisiteId = v)),
-                      const SizedBox(height: 12),
-                      _buildDropdown('Porte d\'entrée', _portesEntree, _selectedPorteEntreeId, 'titre', (v) => setState(() => _selectedPorteEntreeId = v)),
-                      const SizedBox(height: 12),
-                      _buildDropdown('Personnel', _personnel, _selectedPersonnelId, 'nom', (v) {
-                        setState(() {
-                          _selectedPersonnelId = v;
-                          if (v != null) {
-                            final person = _personnel.firstWhere(
-                              (p) {
+                      if (_isHorsNormes) ...[
+                        const SizedBox(height: 12),
+                        _buildDropdown('Département', _departements, _selectedDepartementId, 'nom', (v) {
+                          setState(() {
+                            _selectedDepartementId = v;
+                            if (_selectedPersonnelId != null) {
+                              final stillIn = _filteredPersonnel.any((p) {
                                 final pid = p['id'];
-                                if (pid is int) return pid == v;
-                                if (pid is String) return int.tryParse(pid) == v;
-                                return pid.toString() == v.toString();
-                              },
-                              orElse: () => {},
-                            );
-                            if (person.isNotEmpty) {
-                              final depId = person['departement_id'];
-                              if (depId is int) {
-                                _selectedDepartementId = depId;
-                              } else if (depId is String) {
-                                _selectedDepartementId = int.tryParse(depId);
-                              }
+                                final pIdInt = pid is int ? pid : int.tryParse(pid?.toString() ?? '');
+                                return pIdInt == _selectedPersonnelId;
+                              });
+                              if (!stillIn) _selectedPersonnelId = null;
                             }
-                          }
-                        });
-                      }),
-                      const SizedBox(height: 12),
-                      _buildDropdown('Département', _departements, _selectedDepartementId, 'nom', (v) => setState(() => _selectedDepartementId = v)),
+                          });
+                        }),
+                        if (_selectedDepartementId != null) ...[
+                          const SizedBox(height: 12),
+                          _buildDropdown('Personnel', _filteredPersonnel, _selectedPersonnelId, 'nom', (v) {
+                            setState(() {
+                              _selectedPersonnelId = v;
+                              if (v != null) {
+                                final person = _filteredPersonnel.firstWhere(
+                                  (p) {
+                                    final pid = p['id'];
+                                    if (pid is int) return pid == v;
+                                    if (pid is String) return int.tryParse(pid) == v;
+                                    return pid.toString() == v.toString();
+                                  },
+                                  orElse: () => {},
+                                );
+                                if (person.isNotEmpty) {
+                                  final depId = person['departement_id'];
+                                  if (depId is int) {
+                                    _selectedDepartementId = depId;
+                                  } else if (depId is String) {
+                                    _selectedDepartementId = int.tryParse(depId);
+                                  }
+                                }
+                              }
+                            });
+                          }),
+                        ],
+                      ],
                       const SizedBox(height: 12),
                       _buildField('Badge', _badgeCtrl, icon: Icons.badge),
                       const SizedBox(height: 12),
@@ -634,42 +783,11 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
                     _buildSectionTitle('Horaires'),
                     const SizedBox(height: 8),
                     _buildCard([
-                      _buildDateTimeField('Date et heure d\'arrivée *', _arriveeCtrl),
+                      _buildDateTimeField('Date et heure d\'arrivée *', _arriveeCtrl, validator: _requiredDateTime),
                       const SizedBox(height: 12),
                       _buildDateTimeField('Date et heure de départ prévu', _departPrevuCtrl, readOnly: true),
                     ]),
                     const SizedBox(height: 20),
-
-                    _buildSectionTitle('Signature d\'entrée'),
-                    const SizedBox(height: 8),
-                    Row(children: [
-                      Icon(Icons.draw, size: 18, color: Colors.grey.shade600),
-                      const SizedBox(width: 6),
-                      Text('Signez dans le cadre', style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
-                      const Spacer(),
-                      if (_signatureController.value.isNotEmpty)
-                        TextButton.icon(
-                          onPressed: () { _signatureController.clear(); setState(() {}); },
-                          icon: const Icon(Icons.delete_outline, size: 16),
-                          label: const Text('Effacer', style: TextStyle(fontSize: 12)),
-                          style: TextButton.styleFrom(foregroundColor: Colors.red),
-                        ),
-                    ]),
-                    const SizedBox(height: 6),
-                    Container(
-                      width: double.infinity,
-                      height: 120,
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: Colors.grey.shade300, width: 1.5),
-                      ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(9),
-                        child: Signature(controller: _signatureController, backgroundColor: Colors.white),
-                      ),
-                    ),
-                    const SizedBox(height: 24),
 
                     SizedBox(
                       width: double.infinity,
@@ -752,10 +870,11 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
     );
   }
 
-  Widget _buildField(String label, TextEditingController ctrl, {IconData? icon, int maxLines = 1, bool isDate = false, bool readOnly = false}) {
+  Widget _buildField(String label, TextEditingController ctrl, {IconData? icon, int maxLines = 1, bool isDate = false, bool readOnly = false, String? Function(String?)? validator}) {
     final ro = isDate || readOnly;
     return TextFormField(
       controller: ctrl, maxLines: maxLines, readOnly: ro, onTap: isDate ? () => _pickDate(ctrl) : null,
+      validator: validator,
       style: const TextStyle(fontSize: 14.5, color: AppColors.text),
       decoration: InputDecoration(
         labelText: label,
@@ -785,9 +904,10 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
     );
   }
 
-  Widget _buildDateTimeField(String label, TextEditingController ctrl, {bool readOnly = false}) {
+  Widget _buildDateTimeField(String label, TextEditingController ctrl, {bool readOnly = false, String? Function(String?)? validator}) {
     return TextFormField(
       controller: ctrl, readOnly: true, onTap: readOnly ? null : _pickDateTime,
+      validator: validator,
       style: const TextStyle(fontSize: 14.5, color: AppColors.text),
       decoration: InputDecoration(
         labelText: label,
@@ -839,9 +959,10 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
     );
   }
 
-  Widget _buildDropdownSimple(String label, List<String> items, String? selected, ValueChanged<String?> onChanged) {
+  Widget _buildDropdownSimple(String label, List<String> items, String? selected, ValueChanged<String?> onChanged, {String? Function(String?)? validator}) {
     return DropdownButtonFormField<String>(
       initialValue: selected, isExpanded: true,
+      validator: validator,
       style: const TextStyle(fontSize: 14.5, color: AppColors.text),
       decoration: InputDecoration(
         labelText: label,
@@ -863,9 +984,10 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
     );
   }
 
-  Widget _buildDropdownSearch(String label, List<String> items, String? selected, ValueChanged<String?> onChanged) {
+  Widget _buildDropdownSearch(String label, List<String> items, String? selected, ValueChanged<String?> onChanged, {String? Function(String?)? validator}) {
     return DropdownButtonFormField<String>(
       initialValue: selected, isExpanded: true,
+      validator: validator,
       style: const TextStyle(fontSize: 14.5, color: AppColors.text),
       decoration: InputDecoration(
         labelText: label,

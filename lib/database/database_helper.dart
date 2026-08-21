@@ -24,8 +24,8 @@ class DatabaseHelper {
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
-    await db.execute('PRAGMA journal_mode=WAL');
-    await db.execute('PRAGMA foreign_keys=ON');
+    try { await db.execute('PRAGMA journal_mode=WAL'); } catch (_) {}
+    try { await db.execute('PRAGMA foreign_keys=ON'); } catch (_) {}
     return db;
   }
 
@@ -186,8 +186,8 @@ class DatabaseHelper {
 
     await db.execute('CREATE INDEX IF NOT EXISTS idx_visits_cache_type_page ON visits_cache (cache_type, page)');
     await db.execute('CREATE INDEX IF NOT EXISTS idx_pending_sync_status ON pending_sync (status)');
-    await db.execute('PRAGMA journal_mode=WAL');
-    await db.execute('PRAGMA foreign_keys=ON');
+    try { await db.execute('PRAGMA journal_mode=WAL'); } catch (_) {}
+    try { await db.execute('PRAGMA foreign_keys=ON'); } catch (_) {}
   }
 
   Future<int> insert(String table, Map<String, dynamic> values) async {

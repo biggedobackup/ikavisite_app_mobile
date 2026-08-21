@@ -162,7 +162,23 @@ class VisitService {
         'duree_moyenne_visites': body['duree_moyenne_visites'] ?? 60,
       };
     }
-    throw VisitException('Erreur chargement références');
+    throw VisitException('Erreur chargement references');
+  }
+
+  Future<List<Map<String, dynamic>>> getCreneaux(String token) async {
+    final url = Uri.parse('${ApiConfig.baseUrl}${ApiConfig.creneaux}');
+    final response = await _client.get(url, headers: _headers(token)).timeout(Duration(seconds: ApiConfig.timeoutDefault));
+    if (response.statusCode == 200) return _parseList(response.body);
+    throw VisitException('Erreur chargement creneaux');
+  }
+
+  Future<Map<String, dynamic>> checkMode(String token, {required String date, required String heure}) async {
+    final url = Uri.parse('${ApiConfig.baseUrl}${ApiConfig.checkMode}?date=$date&heure=$heure');
+    final response = await _client.get(url, headers: _headers(token)).timeout(Duration(seconds: ApiConfig.timeoutReferences));
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    }
+    throw VisitException('Erreur vérification mode visite');
   }
 
   Future<List<Map<String, dynamic>>> searchVisiteurs(String token, {String? query}) async {
