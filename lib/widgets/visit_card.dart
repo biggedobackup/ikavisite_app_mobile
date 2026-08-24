@@ -1,8 +1,11 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../config/api_config.dart';
 import '../models/visit.dart';
 import '../screens/visit_detail_screen.dart';
+import '../services/visit_media.dart';
 
 class VisitCard extends StatelessWidget {
   final Visit visit;
@@ -75,6 +78,9 @@ class VisitCard extends StatelessWidget {
   Widget _buildImageHeader(BuildContext context) {
     final photo = visit.visiteur?.photo;
     final hasPhoto = photo != null && photo.isNotEmpty;
+    // Une photo enregistrée sur l'appareil (référence `local:`) se lit sur le
+    // disque : passer par le réseau la ferait échouer hors ligne.
+    final localPhoto = VisitMedia.resolve(photo);
 
     return Container(
       padding: const EdgeInsets.all(12),
@@ -86,21 +92,33 @@ class VisitCard extends StatelessWidget {
         children: [
           ClipRRect(
             borderRadius: BorderRadius.circular(10),
-            child: hasPhoto
+            child: localPhoto != null
                 ? ClipRRect(
                     borderRadius: BorderRadius.circular(10),
-                    child: CachedNetworkImage(
-                      imageUrl: _resolveImageUrl(photo),
+                    child: Image.file(
+                      File(localPhoto),
                       width: 44,
                       height: 44,
                       fit: BoxFit.cover,
-                      memCacheWidth: (44 * MediaQuery.of(context).devicePixelRatio).round(),
-                      memCacheHeight: (44 * MediaQuery.of(context).devicePixelRatio).round(),
-                      placeholder: (ctx, url) => _avatarPlaceholder(),
-                      errorWidget: (ctx, url, err) => _avatarPlaceholder(),
+                      cacheWidth: (44 * MediaQuery.of(context).devicePixelRatio).round(),
+                      errorBuilder: (ctx, err, st) => _avatarPlaceholder(),
                     ),
                   )
-                : _avatarPlaceholder(),
+                : hasPhoto
+                    ? ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: CachedNetworkImage(
+                          imageUrl: _resolveImageUrl(photo),
+                          width: 44,
+                          height: 44,
+                          fit: BoxFit.cover,
+                          memCacheWidth: (44 * MediaQuery.of(context).devicePixelRatio).round(),
+                          memCacheHeight: (44 * MediaQuery.of(context).devicePixelRatio).round(),
+                          placeholder: (ctx, url) => _avatarPlaceholder(),
+                          errorWidget: (ctx, url, err) => _avatarPlaceholder(),
+                        ),
+                      )
+                    : _avatarPlaceholder(),
           ),
           const SizedBox(width: 12),
           Expanded(

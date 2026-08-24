@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
+import '../providers/sync_provider.dart';
 import '../constants/colors.dart';
 import '../screens/scan.dart';
 
@@ -249,6 +250,7 @@ class AppDrawer extends StatelessWidget {
 
   Future<void> _confirmLogout(BuildContext context) async {
     final auth = context.read<AuthProvider>();
+    final pending = context.read<SyncProvider>().pendingCount;
     final navigator = Navigator.of(context);
     Navigator.pop(context);
 
@@ -257,7 +259,9 @@ class AppDrawer extends StatelessWidget {
       builder: (_) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         title: const Text('Déconnexion'),
-        content: const Text('Voulez-vous vous déconnecter ?'),
+        content: Text(pending > 0
+            ? 'Voulez-vous vous déconnecter ?\n\n$pending élément(s) ne sont pas encore synchronisés. Ils seront conservés sur l’appareil et envoyés à la prochaine connexion.'
+            : 'Voulez-vous vous déconnecter ?'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(navigator.context, false),

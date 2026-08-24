@@ -9,7 +9,6 @@ import '../models/dashboard_stats.dart';
 import '../widgets/app_drawer.dart';
 import '../widgets/skeleton_loader.dart';
 import '../widgets/pending_sync_dialog.dart';
-import '../services/local_ocr_service.dart';
 import 'scan.dart';
 
 class DashboardScreen extends StatefulWidget {
@@ -31,7 +30,11 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
   static const Color kBlueSoft = Color(0xFFEFF6FF);
 
   late DashboardProvider _dashboardProvider;
-  int _localPendingCount = 0;
+
+  /// Totaux de la base locale pour les quatre listes, toujours affichés en
+  /// priorité sur les tuiles du tableau de bord (voir
+  /// `_refreshLocalPendingCount`).
+  Map<String, int>? _localCounts;
 
   @override
   void initState() {
@@ -40,17 +43,7 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
     _dashboardProvider.clearStats();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadStats();
-      _preloadRegula();
     });
-  }
-
-  void _preloadRegula() {
-    final localOcr = LocalOcrService();
-    if (!localOcr.isInitialized) {
-      localOcr.initialize().then((ok) {
-        debugPrint('[Dashboard] Regula pré-chargé : $ok');
-      });
-    }
   }
 
   @override
@@ -86,10 +79,29 @@ void _loadStats() {
     _refreshLocalPendingCount();
   }
 
+  /// Les quatre tuiles affichent toujours le total de la base locale — la
+  /// même formule que l'en-tête « N élément(s) » de chaque écran de liste
+  /// (compte serveur en cache + saisies locales non synchronisées) — plutôt
+  /// que les statistiques d'un endpoint séparé. Ce dernier ne connaît pas les
+  /// saisies hors ligne et peut renvoyer des chiffres bien plus bas dès que
+  /// le réseau revient, ce qui faisait retomber les tuiles à zéro à chaque
+  /// bascule en ligne/hors ligne alors que la base locale, elle, ne change
+  /// pas.
   Future<void> _refreshLocalPendingCount() async {
-    final n = await context.read<VisitProvider>().getLocalPendingVisitsCount();
-    if (mounted && n != _localPendingCount) {
-      setState(() => _localPendingCount = n);
+    final visitProvider = context.read<VisitProvider>();
+    // Les saisies hors ligne peuvent n'avoir jamais été chargées si aucune
+    // liste n'a été ouverte : on s'en assure avant de compter.
+    await visitProvider.ensureLocalVisitsLoaded();
+
+    final counts = {
+      'visits-today': await visitProvider.getListTotalCount('today'),
+      'visits-in-progress': await visitProvider.getListTotalCount('en_cours'),
+      'visits-completed': await visitProvider.getListTotalCount('terminees'),
+      'visits-overdue': await visitProvider.getListTotalCount('excedees'),
+    };
+
+    if (mounted && counts.toString() != _localCounts?.toString()) {
+      setState(() => _localCounts = counts);
     }
   }
 
@@ -206,7 +218,7 @@ void _loadStats() {
                   const SliverToBoxAdapter(child: SizedBox(height: 16)),
                   SliverToBoxAdapter(child: _buildSectionTitle('Statistiques')),
                   const SliverToBoxAdapter(child: SizedBox(height: 12)),
-                  _buildStatsSliverGrid(stats.stats, extraEnCours: _localPendingCount),
+                  _buildStatsSliverGrid(stats.stats),
                   const SliverToBoxAdapter(child: SizedBox(height: 28)),
                   SliverToBoxAdapter(child: _buildActionButtons()),
                   const SliverToBoxAdapter(child: SizedBox(height: 24)),
@@ -361,14 +373,22 @@ void _loadStats() {
 
   String? _getScreenFromIconOrLabel(String icon, String label) {
     final l = label.toLowerCase();
-    if (icon == 'today' || l.contains('jour')) return 'visits-today';
-    if (icon == 'clock' || l.contains('cours')) return 'visits-in-progress';
-    if (icon == 'check' || icon == 'check-circle' || l.contains('termin')) return 'visits-completed';
-    if (icon == 'alert' || l.contains('excéd') || l.contains('exced')) return 'visits-overdue';
+    // L'icône prime sur le libellé, et les libellés les plus spécifiques sont
+    // testés d'abord : « Visites terminées du jour » contient à la fois
+    // « termin » et « jour », l'ordre décidait donc du résultat — et le
+    // rattachait à tort à la liste du jour.
+    if (icon == 'today') return 'visits-today';
+    if (icon == 'clock') return 'visits-in-progress';
+    if (icon == 'check' || icon == 'check-circle') return 'visits-completed';
+    if (icon == 'alert') return 'visits-overdue';
+    if (l.contains('termin')) return 'visits-completed';
+    if (l.contains('excéd') || l.contains('exced')) return 'visits-overdue';
+    if (l.contains('cours')) return 'visits-in-progress';
+    if (l.contains('jour')) return 'visits-today';
     return null;
   }
 
-  Widget _buildStatsSliverGrid(List<StatItem> items, {int extraEnCours = 0}) {
+  Widget _buildStatsSliverGrid(List<StatItem> items) {
     return SliverGrid(
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 2,
@@ -381,9 +401,9 @@ void _loadStats() {
           final item = items[i];
           final screen = item.screen ?? _getScreenFromIconOrLabel(item.icon, item.label);
           final tone = _toneForStat(item.icon, item.label, item.tone);
-          final value = screen == 'visits-in-progress'
-              ? item.value + extraEnCours
-              : item.value;
+          // La base locale fait foi, en ligne comme hors ligne (voir
+          // `_refreshLocalPendingCount`).
+          final value = _localCounts?[screen] ?? item.value;
           return _buildStatCard(
             item.icon, tone, item.label, value, item.sub,
             onTap: screen != null ? () => _navigateToScreen(screen) : null,

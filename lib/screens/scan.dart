@@ -1,5 +1,6 @@
-import 'dart:io';
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_document_reader_api/flutter_document_reader_api.dart' hide File;
 import 'package:path_provider/path_provider.dart';
@@ -27,38 +28,61 @@ class _ScanScreenState extends State<ScanScreen> {
   Scenario _scenario = Scenario.OCR;
   ScanResultData? _scanData;
 
+  /// Vrai quand les fichiers du scan ont ete transmis au formulaire : ils ne
+  /// doivent alors pas etre supprimes a la fermeture de cet ecran.
+  bool _handedOff = false;
+
   @override
   void initState() {
     super.initState();
     _initRegula();
   }
 
-  Future<void> _initRegula() async {
-    final localOcr = LocalOcrService();
-    final ok = await localOcr.initialize();
-    if (!ok && mounted) {
-      setState(() {
-        _isInitializing = false;
-        _status = localOcr.initError ?? 'Échec d\'initialisation du scanner.';
-      });
-      return;
-    }
-    if (!await _documentReader.isReady) {
-      if (mounted) {
-        setState(() {
-          _isInitializing = false;
-          _status = localOcr.initError ?? 'Scanner non prêt. Redémarrez l\'application.';
-        });
+  @override
+  void dispose() {
+    // Le scan est termine (ou abandonne) : le moteur natif — environ 250 Mo —
+    // n'a plus de raison de rester en memoire.
+    unawaited(LocalOcrService().release());
+    if (!_handedOff) {
+      // Scan abandonne : ses images temporaires ne serviront a personne.
+      for (final f in [_scanData?.rectoImage, _scanData?.versoImage, _scanData?.portrait]) {
+        if (f != null) f.delete().catchError((_) => f);
       }
-      return;
     }
-    _scenario = _bestScenario;
-    if (mounted) {
+    super.dispose();
+  }
+
+  /// Prepare le moteur de lecture des que l'ecran s'ouvre, sans jamais bloquer
+  /// l'interface : tout le travail lourd se fait cote natif, en tache de fond.
+  /// Les deux boutons restent donc utilisables pendant la preparation — celui
+  /// qui ouvre directement le formulaire ne doit jamais attendre le scanner.
+  /// Si l'utilisateur lance un scan avant la fin, [_startScan] rejoint la meme
+  /// initialisation au lieu d'en demarrer une seconde.
+  Future<void> _initRegula() async {
+    if (await _documentReader.isReady) {
+      if (!mounted) return;
+      _scenario = _bestScenario;
       setState(() {
         _isInitializing = false;
         _status = 'Scanner prêt.';
       });
+      return;
     }
+
+    if (!mounted) return;
+    setState(() {
+      _isInitializing = false;
+      _status = 'Préparation du scanner...';
+    });
+
+    final ok = await LocalOcrService().initialize();
+    if (!mounted) return;
+    if (ok) _scenario = _bestScenario;
+    setState(() {
+      _status = ok
+          ? 'Scanner prêt.'
+          : 'Scanner indisponible. Utilisez « Continuer sans scan direct ».';
+    });
   }
 
   Scenario get _bestScenario {
@@ -87,13 +111,18 @@ class _ScanScreenState extends State<ScanScreen> {
     try {
       if (!await _documentReader.isReady) {
         setState(() {
-          _status = 'Initialisation du scanner...';
+          _status = 'Initialisation du scanner (premier scan)...';
         });
+        // Laisse la frame se peindre : l'initialisation qui suit bloque le
+        // thread UI plusieurs secondes, le message doit etre visible avant.
+        await WidgetsBinding.instance.endOfFrame;
         final localOcr = LocalOcrService();
         final ok = await localOcr.initialize();
         if (!ok || !await _documentReader.isReady) {
           throw StateError(localOcr.initError ?? 'Scanner non prêt');
         }
+        if (!mounted) return;
+        _scenario = _bestScenario;
       }
       setState(() {
         _status = 'Cadrez la pièce dans le rectangle.';
@@ -358,6 +387,7 @@ class _ScanScreenState extends State<ScanScreen> {
 
   void _openForm(ScanResultData? data) {
     if (!mounted) return;
+    _handedOff = data != null;
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(
         builder: (_) => AddVisitScreen(scanData: data),
@@ -773,7 +803,7 @@ class _ScanScreenState extends State<ScanScreen> {
                     width: double.infinity,
                     height: 52,
                     child: OutlinedButton(
-                      onPressed: () => _openForm(null),
+                      onPressed: _isScanning ? null : () => _openForm(null),
                       child: Text(
                         'CONTINUER SANS SCAN DIRECT',
                         style: AppText.inter(

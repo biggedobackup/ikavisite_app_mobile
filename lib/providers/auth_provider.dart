@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import '../database/database_helper.dart';
 import '../models/user.dart';
@@ -24,32 +26,45 @@ class AuthProvider extends ChangeNotifier {
   String? get accessToken => _user?.accessToken;
   String? get refreshToken => _user?.refreshToken;
 
-  Future<void> checkSession() async {
-    _isLoading = true;
-    notifyListeners();
-
+  /// Restaure la session depuis SQLite uniquement : aucun appel reseau.
+  /// C'est ce qui decide de la route de demarrage, donc ca doit rester
+  /// quasi instantane.
+  Future<void> restoreLocalSession() async {
     final result = await _db.getFirst('users', where: 'is_connected = ?', whereArgs: [1]);
-    if (result != null) {
-      _user = User.fromMap(result);
-      if (_connectivity.isConnected && _user!.accessToken != null) {
-        try {
-          final userData = await _authService.getMe(_user!.accessToken!);
-          _user = User.fromJson(
-            userData,
-            accessToken: _user!.accessToken,
-            refreshToken: _user!.refreshToken,
-          );
-          await _saveUser(_user!);
-        } catch (_) {
-          if (_user!.refreshToken != null) {
-            await _tryRefreshToken();
-          }
-        }
+    if (result == null) return;
+    _user = User.fromMap(result);
+    notifyListeners();
+  }
+
+  /// Rafraichit le profil depuis l'API sans bloquer l'interface. En cas
+  /// d'echec la session locale reste utilisable (mode hors ligne) et un
+  /// eventuel 401 sera traite par les ecrans via [refreshAccessToken].
+  Future<void> refreshSessionInBackground() async {
+    final token = _user?.accessToken;
+    if (token == null || !_connectivity.isConnected) return;
+
+    try {
+      final userData = await _authService.getMe(token);
+      final current = _user;
+      // L'utilisateur a pu se deconnecter pendant l'appel reseau.
+      if (current == null) return;
+      _user = User.fromJson(
+        userData,
+        accessToken: current.accessToken,
+        refreshToken: current.refreshToken,
+      );
+      await _saveUser(_user!);
+      notifyListeners();
+    } catch (_) {
+      if (_user?.refreshToken != null && await _tryRefreshToken()) {
+        notifyListeners();
       }
     }
+  }
 
-    _isLoading = false;
-    notifyListeners();
+  Future<void> checkSession() async {
+    await restoreLocalSession();
+    unawaited(refreshSessionInBackground());
   }
 
   Future<bool> login(String username, String password) async {
@@ -99,18 +114,35 @@ class AuthProvider extends ChangeNotifier {
     return _tryRefreshToken();
   }
 
+  /// Deconnexion immediate. La notification du serveur part en tache de fond :
+  /// avec un reseau degrade elle peut prendre jusqu'a 15 s (timeout), et
+  /// l'utilisateur restait bloque sur l'ecran precedent pendant tout ce temps.
+  /// La session locale, elle, est purgee tout de suite.
   Future<void> logout() async {
-    if (_connectivity.isConnected && _user?.accessToken != null) {
-      try {
-        await _authService.logout(_user!.accessToken!);
-      } catch (_) {}
+    final token = _user?.accessToken;
+    if (_connectivity.isConnected && token != null) {
+      unawaited(_authService.logout(token).catchError((Object _) {}));
     }
 
-    await _db.delete('users', where: 'is_connected = ?', whereArgs: [1]);
-    await _db.clearTable('dashboard_cache');
-    await _db.clearTable('visits_cache');
     _user = null;
     notifyListeners();
+
+    await _db.delete('users', where: 'is_connected = ?', whereArgs: [1]);
+    // Toutes les donnees en cache appartiennent au compte qui se deconnecte :
+    // elles ne doivent pas rester visibles pour le compte suivant.
+    // `pending_sync` est volontairement conserve — ce sont des saisies de
+    // l'utilisateur pas encore envoyees, les effacer serait une perte de
+    // donnees. Elles repartiront a la prochaine synchronisation.
+    for (final table in const [
+      'dashboard_cache',
+      'visits',
+      'visit_listes',
+      'visits_meta',
+      'visiteurs',
+      'dropdown_cache',
+    ]) {
+      await _db.clearTable(table);
+    }
   }
 
   Future<void> updateProfile({
@@ -131,44 +163,63 @@ class AuthProvider extends ChangeNotifier {
     _error = null;
     notifyListeners();
 
-    if (_connectivity.isConnected) {
-      try {
-        final response = await _authService.updateMe(
-          _user!.accessToken!,
-          firstName: firstName,
-          lastName: lastName,
-          telephoneMobile: telephoneMobile,
-          email: email,
-        );
-        final updated = User.fromJson(
-          response['user'] as Map<String, dynamic>? ?? response,
-          accessToken: _user!.accessToken,
-          refreshToken: _user!.refreshToken,
-        );
-        _user = _user!.copyWith(
-          firstName: updated.firstName,
-          lastName: updated.lastName,
-          telephoneMobile: updated.telephoneMobile,
-          email: updated.email,
-        );
-        await _saveUser(_user!);
-        notifyListeners();
-      } catch (e) {
-        debugPrint('updateProfile API failed, queuing sync: $e');
-        await _syncService.enqueue('update_profile', {
+    // La modification est deja enregistree localement : on rend la main tout
+    // de suite et on pousse vers le serveur en tache de fond. En cas d'echec
+    // (ou hors ligne) elle part dans pending_sync, donc rien n'est perdu.
+    unawaited(_pushProfileUpdate(
+      firstName: firstName,
+      lastName: lastName,
+      telephoneMobile: telephoneMobile,
+      email: email,
+    ));
+  }
+
+  Future<void> _pushProfileUpdate({
+    String? firstName,
+    String? lastName,
+    String? telephoneMobile,
+    String? email,
+  }) async {
+    Future<void> queue() => _syncService.enqueue('update_profile', {
           'first_name': firstName,
           'last_name': lastName,
           'telephone_mobile': telephoneMobile,
           'email': email,
         });
-      }
-    } else {
-      await _syncService.enqueue('update_profile', {
-        'first_name': firstName,
-        'last_name': lastName,
-        'telephone_mobile': telephoneMobile,
-        'email': email,
-      });
+
+    final token = _user?.accessToken;
+    if (!_connectivity.isConnected || token == null) {
+      await queue();
+      return;
+    }
+
+    try {
+      final response = await _authService.updateMe(
+        token,
+        firstName: firstName,
+        lastName: lastName,
+        telephoneMobile: telephoneMobile,
+        email: email,
+      );
+      final current = _user;
+      // L'utilisateur a pu se deconnecter pendant l'appel reseau.
+      if (current == null) return;
+      final updated = User.fromJson(
+        response['user'] as Map<String, dynamic>? ?? response,
+        accessToken: current.accessToken,
+        refreshToken: current.refreshToken,
+      );
+      _user = current.copyWith(
+        firstName: updated.firstName,
+        lastName: updated.lastName,
+        telephoneMobile: updated.telephoneMobile,
+        email: updated.email,
+      );
+      await _saveUser(_user!);
+      notifyListeners();
+    } catch (e) {
+      debugPrint('updateProfile API failed, queuing sync: $e');
+      await queue();
     }
   }
 

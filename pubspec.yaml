@@ -65,7 +65,10 @@ flutter:
   assets:
     - assets/images/
     - assets/regula.license
-    - assets/Regula/db.dat
+    # assets/Regula/db.dat n'est PAS embarque ici : la base de reference Regula
+    # est livree dans les assets natifs Android, ou le SDK va la chercher seul.
+    # L'y ajouter la dupliquerait dans l'APK (+72 Mo) et forcerait un transfert
+    # de 72 Mo depuis Dart a chaque lancement.
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

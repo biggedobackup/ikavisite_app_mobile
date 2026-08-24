@@ -80,12 +80,78 @@ class DashboardProvider extends ChangeNotifier {
       }
     } else {
       if (_stats == null) {
-        _error = 'Aucune donnée en cache. Connectez-vous à Internet pour synchroniser.';
+        // Pas de statistiques serveur en cache, mais la base locale des
+        // visites peut suffire à remplir les quatre tuiles.
+        _stats = await _statsFromLocalBase();
+        if (_stats == null) {
+          _error = 'Aucune donnée en cache. Connectez-vous à Internet pour synchroniser.';
+        }
       }
     }
 
     _isLoading = false;
     notifyListeners();
+  }
+
+  /// Construit les quatre tuiles à partir de la base locale des visites :
+  /// même calcul que l'en-tête « N élément(s) » des listes (total annoncé par
+  /// le serveur + saisies locales non synchronisées).
+  Future<DashboardStats?> _statsFromLocalBase() async {
+    try {
+      final db = await _db.database;
+
+      Future<int> compte(String liste) async {
+        final meta = await db.query('visits_meta',
+            columns: ['server_count'],
+            where: 'liste = ?',
+            whereArgs: [liste],
+            limit: 1);
+        final serveur =
+            meta.isEmpty ? 0 : (meta.first['server_count'] as int? ?? 0);
+        final locales = await db.rawQuery(
+            'SELECT COUNT(*) AS n FROM visit_listes l '
+            'JOIN visits v ON v.id = l.visit_id '
+            'WHERE l.liste = ? AND v.est_local = 1',
+            [liste]);
+        return serveur + ((locales.first['n'] as int?) ?? 0);
+      }
+
+      final today = await compte('today');
+      final enCours = await compte('en_cours');
+      final terminees = await compte('terminees');
+      final excedees = await compte('excedees');
+      if (today == 0 && enCours == 0 && terminees == 0 && excedees == 0) {
+        return null;
+      }
+
+      return DashboardStats(
+        period: DashboardPeriod(label: 'Hors ligne', start: '', end: ''),
+        stats: [
+          StatItem(icon: 'today', tone: 'primary', label: 'Visites du jour',
+              value: today, sub: "aujourd'hui", screen: 'visits-today'),
+          StatItem(icon: 'clock', tone: 'warning', label: 'Visites en cours',
+              value: enCours, sub: 'en cours', screen: 'visits-in-progress'),
+          StatItem(icon: 'check', tone: 'success', label: 'Visites terminées du jour',
+              value: terminees, sub: "aujourd'hui", screen: 'visits-completed'),
+          StatItem(icon: 'alert', tone: 'danger', label: 'Visites excédées',
+              value: excedees, sub: 'excédées', screen: 'visits-overdue'),
+        ],
+        visitsByDepartment: const [],
+        visitsByDay: const [],
+        visitsByEntryPoint: const [],
+        incidentsFlow: const [],
+        visitTypes: const [],
+        totalVisitesParType: 0,
+        showChartVisitsByDepartment: false,
+        showChartVisitsByDay: false,
+        showChartVisitsByEntryPoint: false,
+        showChartIncidentsFlow: false,
+        showChartVisitTypes: false,
+      );
+    } catch (e) {
+      debugPrint('[DashboardProvider] Statistiques locales indisponibles : $e');
+      return null;
+    }
   }
 
   Future<void> _saveStatsToCache(DashboardStats stats) async {

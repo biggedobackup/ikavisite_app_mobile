@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
@@ -11,6 +13,10 @@ class SplashScreen extends StatefulWidget {
 
 class _SplashScreenState extends State<SplashScreen>
     with SingleTickerProviderStateMixin {
+  /// Duree minimale d'affichage du splash : juste assez pour que l'animation
+  /// d'entree se termine, sans imposer d'attente artificielle.
+  static const Duration _minSplashDuration = Duration(milliseconds: 900);
+
   late AnimationController _controller;
   late Animation<double> _fadeAnim;
   late Animation<double> _scaleAnim;
@@ -28,7 +34,7 @@ class _SplashScreenState extends State<SplashScreen>
 
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1800),
+      duration: const Duration(milliseconds: 1000),
     );
 
     _fadeAnim = Tween<double>(begin: 0.0, end: 1.0).animate(
@@ -44,19 +50,26 @@ class _SplashScreenState extends State<SplashScreen>
   }
 
   Future<void> _checkAuth() async {
-    await Future.delayed(const Duration(milliseconds: 2400));
-    if (!mounted) return;
-
     final auth = context.read<AuthProvider>();
-    await auth.checkSession();
+
+    // La session est restauree depuis SQLite uniquement : plus aucun appel
+    // reseau ne retarde l'arrivee sur le tableau de bord. La seule attente
+    // restante est celle de l'animation d'entree.
+    await Future.wait<void>([
+      auth.restoreLocalSession(),
+      Future<void>.delayed(_minSplashDuration),
+    ]);
 
     if (!mounted) return;
 
-    if (auth.isLoggedIn) {
-      Navigator.pushReplacementNamed(context, '/dashboard');
-    } else {
-      Navigator.pushReplacementNamed(context, '/login');
-    }
+    Navigator.pushReplacementNamed(
+      context,
+      auth.isLoggedIn ? '/dashboard' : '/login',
+    );
+
+    // Rafraichissement du profil en tache de fond : ne doit jamais retarder
+    // la navigation.
+    unawaited(auth.refreshSessionInBackground());
   }
 
   @override

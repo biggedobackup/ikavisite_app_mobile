@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'database/database_helper.dart';
 import 'services/http_override.dart';
+import 'services/visit_media.dart';
 import 'providers/connectivity_provider.dart';
 import 'providers/auth_provider.dart';
 import 'providers/dashboard_provider.dart';
@@ -21,8 +24,14 @@ import 'constants/colors.dart';
 final RouteObserver<ModalRoute<void>> routeObserver = RouteObserver<ModalRoute<void>>();
 
 void main() async {
-  HttpOverrides.global = IkaHttpOverrides();
   WidgetsFlutterBinding.ensureInitialized();
+  HttpOverrides.global = IkaHttpOverrides();
+  // Le dossier des images doit être connu avant le premier affichage : les
+  // widgets résolvent les références locales de façon synchrone.
+  await VisitMedia.ensureRoot();
+  // Ouverture (et migrations) de SQLite lancée pendant que la premiere frame
+  // se dessine : le splash n'attend plus l'ouverture de la base.
+  unawaited(DatabaseHelper().database);
   runApp(const IkaVisiteApp());
 }
 
@@ -39,10 +48,16 @@ class IkaVisiteApp extends StatelessWidget {
         ChangeNotifierProvider(create: (ctx) => VisitProvider(ctx.read<ConnectivityProvider>())),
         ChangeNotifierProvider(create: (ctx) {
           final auth = ctx.read<AuthProvider>();
+          final visits = ctx.read<VisitProvider>();
           return SyncProvider(
             ctx.read<ConnectivityProvider>(),
             () => auth.accessToken,
             onUnauthorized: () async => auth.refreshAccessToken(),
+            // Une saisie hors ligne créée côté serveur remplace sa copie
+            // locale : sans cela, la copie restait affichée et sa
+            // modification échouait.
+            onVisiteCreee: (pendingId, visit, terminee) =>
+                visits.adoptServerVisit(pendingId, visit, terminee: terminee),
           );
         }),
       ],

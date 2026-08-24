@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:image_picker/image_picker.dart';
@@ -10,6 +9,7 @@ import 'package:sqflite/sqflite.dart';
 import '../providers/auth_provider.dart';
 import '../providers/visit_provider.dart';
 import '../providers/connectivity_provider.dart';
+import '../services/visit_media.dart';
 import '../services/visit_service.dart';
 import '../widgets/app_drawer.dart';
 import '../database/database_helper.dart';
@@ -48,6 +48,7 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
 
   int? _selectedTypeVisiteId;
   int? _selectedPorteEntreeId;
+  int? _agentPorteEntreeId;
   int? _selectedPersonnelId;
   int? _selectedDepartementId;
   String? _selectedGenre;
@@ -93,9 +94,16 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
       penColor: Colors.black,
       exportBackgroundColor: Colors.white,
     );
+    // Porte d'entree de l'agent connecte : le champ ayant ete retire du
+    // formulaire, c'est elle qui rattache la visite, et non la premiere porte
+    // de la liste.
+    _agentPorteEntreeId = context.read<AuthProvider>().user?.porteEntreeId;
     _initArrivee();
     _fillFromScanData();
     _numeroPieceCtrl.addListener(_scheduleVisitorLookup);
+    // Un agent peut identifier le visiteur par son NIP plutôt que par le
+    // numéro de pièce : les deux champs déclenchent la recherche.
+    _nipCtrl.addListener(_scheduleVisitorLookup);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadDropdowns();
       _checkVisitMode();
@@ -178,6 +186,17 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
     return null;
   }
 
+  /// Applique la valeur issue du scan sans jamais ecraser un choix deja fait
+  /// par l'utilisateur. Le formulaire charge ses listes en deux passes, cache
+  /// puis reseau : sans cette garde, une selection faite pendant la seconde qui
+  /// suit l'ouverture etait remplacee par la valeur du scan a l'arrivee de la
+  /// reponse reseau. Un choix devenu absent de la liste rafraichie est en
+  /// revanche abandonne, car le menu ne saurait plus l'afficher.
+  String? _keepOrMatch(String? current, List<String> items, String? scanValue) {
+    if (current != null && items.contains(current)) return current;
+    return _matchDropdownValue(items, scanValue);
+  }
+
   @override
   void dispose() {
     _visitorLookupDebounce?.cancel();
@@ -218,13 +237,10 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
       setState(() {
         _loadingDropdowns = false;
         // Matching approximatif des valeurs du scan dans les dropdowns
-        _selectedNationalite = _matchDropdownValue(_nationalites, _scanNationalite) ?? _selectedNationalite;
-        _selectedPays = _matchDropdownValue(_pays, _scanPays) ?? _selectedPays;
-        _selectedTypePiece ??= _matchDropdownValue(_typesPiece, _scanTypePiece);
-        if (_selectedPorteEntreeId == null && _portesEntree.isNotEmpty) {
-          final firstId = _portesEntree.first['id'];
-          _selectedPorteEntreeId = firstId is int ? firstId : int.tryParse(firstId.toString());
-        }
+        _selectedNationalite = _keepOrMatch(_selectedNationalite, _nationalites, _scanNationalite);
+        _selectedPays = _keepOrMatch(_selectedPays, _pays, _scanPays);
+        _selectedTypePiece = _keepOrMatch(_selectedTypePiece, _typesPiece, _scanTypePiece);
+        _applyDefaultPorteEntree();
       });
     }
 
@@ -255,13 +271,10 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
             _dureeMoyenneVisites = refs['duree_moyenne_visites'] as int? ?? 60;
 
             // Recalculer les valeurs du scan correspondantes
-            _selectedNationalite = _matchDropdownValue(_nationalites, _scanNationalite) ?? _selectedNationalite;
-            _selectedPays = _matchDropdownValue(_pays, _scanPays) ?? _selectedPays;
-            _selectedTypePiece ??= _matchDropdownValue(_typesPiece, _scanTypePiece);
-            if (_selectedPorteEntreeId == null && _portesEntree.isNotEmpty) {
-              final firstId = _portesEntree.first['id'];
-              _selectedPorteEntreeId = firstId is int ? firstId : int.tryParse(firstId.toString());
-            }
+            _selectedNationalite = _keepOrMatch(_selectedNationalite, _nationalites, _scanNationalite);
+            _selectedPays = _keepOrMatch(_selectedPays, _pays, _scanPays);
+            _selectedTypePiece = _keepOrMatch(_selectedTypePiece, _typesPiece, _scanTypePiece);
+            _applyDefaultPorteEntree();
 
             _loadingDropdowns = false;
           });
@@ -474,7 +487,8 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
     try {
       final mode = await _service.checkMode(t, date: parts[0], heure: parts[1]);
       if (!mounted) return;
-      setState(() => _isHorsNormes = mode['mode'] == 'HORS_NORMES');
+      setState(() =>
+          _isHorsNormes = _horsCreneau || mode['mode'] == 'HORS_NORMES');
     } catch (e) {
       debugPrint('[AddVisitScreen] check-mode indisponible (mode inconnu): $e');
     }
@@ -486,48 +500,106 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
   }
 
   Future<void> _lookupVisitor() async {
-    final number = _numeroPieceCtrl.text.trim();
+    final piece = _numeroPieceCtrl.text.trim();
+    final number = piece.isNotEmpty ? piece : _nipCtrl.text.trim();
     if (number.isEmpty) return;
-    if (!(context.read<ConnectivityProvider>().isConnected)) return;
+
+    final visitProvider = context.read<VisitProvider>();
+    final connected = context.read<ConnectivityProvider>().isConnected;
     final t = _getToken();
-    if (t == null) return;
-    try {
-      final results = await _service.searchVisiteurs(t, query: number);
-      if (!mounted || results.isEmpty) return;
-      Map<String, dynamic> best = results.first;
-      final upper = number.toUpperCase();
-      for (final v in results) {
-        final np = (v['numero_piece'] as String?)?.toUpperCase();
-        final nip = (v['numero_nip'] as String?)?.toUpperCase();
-        if (np == upper || nip == upper) {
-          best = v;
-          break;
+
+    if (connected && t != null) {
+      try {
+        final results = await _service.searchVisiteurs(t, query: number);
+        if (!mounted) return;
+        if (results.isNotEmpty) {
+          Map<String, dynamic> best = results.first;
+          final upper = number.toUpperCase();
+          for (final v in results) {
+            final np = (v['numero_piece'] as String?)?.toUpperCase();
+            final nip = (v['numero_nip'] as String?)?.toUpperCase();
+            if (np == upper || nip == upper) {
+              best = v;
+              break;
+            }
+          }
+          _applyVisiteurConnu(best);
+          return;
         }
+      } catch (e) {
+        debugPrint('[AddVisitScreen] Recherche visiteur indisponible: $e');
       }
-      setState(() {
-        final phone = best['telephone'] as String?;
-        if (phone != null && phone.trim().isNotEmpty && _telephoneCtrl.text.trim().isEmpty) {
-          _telephoneCtrl.text = phone;
-        }
-        final nat = best['nationalite'] as String?;
-        if (nat != null && nat.trim().isNotEmpty && _selectedNationalite == null) {
-          final matched = _matchDropdownValue(_nationalites, nat);
-          if (matched != null) _selectedNationalite = matched;
-        }
-      });
-    } catch (e) {
-      debugPrint('[AddVisitScreen] Recherche visiteur indisponible: $e');
     }
+
+    // Repli sur le répertoire local : hors ligne, ou serveur injoignable,
+    // l'appareil connaît déjà les visiteurs enregistrés ici.
+    final local = await visitProvider.findVisiteurLocal(number);
+    if (local != null && mounted) _applyVisiteurConnu(local);
   }
 
-  Future<String?> _fileToBase64(String? path) async {
-    if (path == null) return null;
-    return compute(_encodeFileToBase64, path);
+  /// Ne remplit que les champs encore vides : une saisie de l'agent n'est
+  /// jamais écrasée par une valeur retrouvée.
+  void _applyVisiteurConnu(Map<String, dynamic> data) {
+    setState(() {
+      final phone = data['telephone'] as String?;
+      if (phone != null && phone.trim().isNotEmpty && _telephoneCtrl.text.trim().isEmpty) {
+        _telephoneCtrl.text = phone;
+      }
+      final nat = data['nationalite'] as String?;
+      if (nat != null && nat.trim().isNotEmpty && _selectedNationalite == null) {
+        final matched = _matchDropdownValue(_nationalites, nat);
+        if (matched != null) _selectedNationalite = matched;
+      }
+    });
   }
 
-  static String _encodeFileToBase64(String path) {
-    final bytes = File(path).readAsBytesSync();
-    return 'data:image/png;base64,${base64Encode(bytes)}';
+  int? _asId(Object? raw) => raw is int ? raw : int.tryParse(raw?.toString() ?? '');
+
+  /// Liste proposee pour « Personnel » : restreinte au departement choisi, ou
+  /// l'effectif complet tant qu'aucun departement ne l'est. C'est ce qui rend
+  /// possibles les deux sens de saisie demandes — partir du departement pour
+  /// filtrer les personnes, ou partir d'une personne et laisser son
+  /// departement se deduire.
+  List<Map<String, dynamic>> get _personnelChoices =>
+      _selectedDepartementId == null ? _personnel : _filteredPersonnel;
+
+  void _onDepartementChanged(int? v) {
+    setState(() {
+      _selectedDepartementId = v;
+      // Une personne deja choisie qui ne releve pas du nouveau departement est
+      // retiree plutot que laissee dans un etat incoherent.
+      if (_selectedPersonnelId != null &&
+          !_personnelChoices.any((p) => _asId(p['id']) == _selectedPersonnelId)) {
+        _selectedPersonnelId = null;
+      }
+    });
+  }
+
+  void _onPersonnelChanged(int? v) {
+    setState(() {
+      _selectedPersonnelId = v;
+      if (v == null) return;
+      final person = _personnel.firstWhere(
+        (p) => _asId(p['id']) == v,
+        orElse: () => <String, dynamic>{},
+      );
+      final depId = _asId(person['departement_id']);
+      if (depId != null) _selectedDepartementId = depId;
+    });
+  }
+
+  /// Le champ « porte d'entree » a ete retire du formulaire : la visite est
+  /// rattachee a la porte affectee a l'agent connecte. Le repli sur la
+  /// premiere porte de la liste n'a lieu que si son profil n'en declare aucune.
+  void _applyDefaultPorteEntree() {
+    if (_selectedPorteEntreeId != null || _portesEntree.isEmpty) return;
+
+    final agentPorte = _agentPorteEntreeId;
+    if (agentPorte != null && _portesEntree.any((p) => _asId(p['id']) == agentPorte)) {
+      _selectedPorteEntreeId = agentPorte;
+      return;
+    }
+    _selectedPorteEntreeId = _asId(_portesEntree.first['id']);
   }
 
   String? _required(String? v) => (v == null || v.trim().isEmpty) ? 'Ce champ est obligatoire' : null;
@@ -540,13 +612,26 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
 
   static const List<String> _joursSemaine = ['LUNDI','MARDI','MERCREDI','JEUDI','VENDREDI','SAMEDI','DIMANCHE'];
 
-  String? _validateCreneau() {
-    if (_creneaux.isEmpty) return null;
+  /// Seule une date d'arrivée illisible bloque : être hors créneau n'est
+  /// plus un motif de refus (la visite passe alors en mode hors normes).
+  String? _validateArrivee() {
     final parts = _arriveeCtrl.text.split(' ');
     if (parts.length != 2) return 'Format de date d\'arrivee invalide';
     final dateParts = parts[0].split('-');
     final timeParts = parts[1].split(':');
     if (dateParts.length != 3 || timeParts.length < 2) return 'Format de date d\'arrivee invalide';
+    return null;
+  }
+
+  /// Vrai quand l'heure d'arrivée ne tombe dans aucun créneau actif. Sans
+  /// créneaux connus (jamais synchronisés), on considère être dans les normes.
+  bool get _horsCreneau {
+    if (_creneaux.isEmpty) return false;
+    final parts = _arriveeCtrl.text.split(' ');
+    if (parts.length != 2) return false;
+    final dateParts = parts[0].split('-');
+    final timeParts = parts[1].split(':');
+    if (dateParts.length != 3 || timeParts.length < 2) return false;
     final dt = DateTime(
       int.parse(dateParts[0]),
       int.parse(dateParts[1]),
@@ -556,7 +641,7 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
     );
     final jour = _joursSemaine[dt.weekday - 1];
     final heureArrivee = '${timeParts[0]}:${timeParts[1]}';
-    final actifs = _creneaux.where((c) =>
+    return !_creneaux.any((c) =>
       c['jour_semaine'] == jour &&
       c['statut'] == 'ACTIF' &&
       c['heure_debut'] != null &&
@@ -564,22 +649,60 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
       (c['heure_debut'] as String).compareTo(heureArrivee) <= 0 &&
       (c['heure_fin'] as String).compareTo(heureArrivee) >= 0,
     );
-    if (actifs.isEmpty) {
-      return 'Aucun creneau actif pour $jour a $heureArrivee';
+  }
+
+  /// Libellés joints à la saisie (clés privées, jamais envoyées à l'API) :
+  /// sans eux, la fiche d'une visite hors ligne n'afficherait ni la porte
+  /// d'entrée, ni le personnel, ni le type de visite.
+  void _ajouterLibelles(Map<String, dynamic> body) {
+    Map<String, dynamic> trouve(List<Map<String, dynamic>> items, int? id) =>
+        items.firstWhere((e) => _asId(e['id']) == id,
+            orElse: () => const <String, dynamic>{});
+
+    final tv = trouve(_typesVisite, _selectedTypeVisiteId);
+    if (tv['nom'] != null) body['_type_visite_nom'] = tv['nom'];
+    if (tv['description'] != null) {
+      body['_type_visite_description'] = tv['description'];
     }
-    return null;
+
+    final pe = trouve(_portesEntree, _selectedPorteEntreeId);
+    if (pe['titre'] != null) body['_porte_entree_titre'] = pe['titre'];
+    if (pe['emplacement'] != null) {
+      body['_porte_entree_emplacement'] = pe['emplacement'];
+    }
+
+    final p = trouve(_personnel, _selectedPersonnelId);
+    if (p['nom'] != null) body['_personnel_nom'] = p['nom'];
+    if (p['prenom'] != null) body['_personnel_prenom'] = p['prenom'];
+    if (p['fonction'] != null) body['_personnel_fonction'] = p['fonction'];
+    final dep = p['departement_nom'] ?? p['departement'];
+    if (dep is String) body['_personnel_departement'] = dep;
   }
 
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
 
-    final creneauError = _validateCreneau();
-    if (creneauError != null) {
+    final arriveeError = _validateArrivee();
+    if (arriveeError != null) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(creneauError),
+        content: Text(arriveeError),
         backgroundColor: Colors.red,
       ));
       return;
+    }
+
+    // Hors créneau, l'enregistrement passe quand même — mais le personnel à
+    // visiter devient obligatoire.
+    if (_horsCreneau || _isHorsNormes) {
+      if (!_isHorsNormes) setState(() => _isHorsNormes = true);
+      if (_selectedPersonnelId == null) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text(
+              'Visite hors créneau : le personnel à visiter est obligatoire.'),
+          backgroundColor: Colors.red,
+        ));
+        return;
+      }
     }
 
     final t = _getToken();
@@ -626,15 +749,28 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
       if (_selectedNationalite != null) body['v_nationalite'] = _selectedNationalite;
       if (_selectedPays != null) body['v_pays_delivrance'] = _selectedPays;
       if (_selectedTypePiece != null) body['v_piece_identite'] = _selectedTypePiece;
+      _ajouterLibelles(body);
 
-      final photo = await _fileToBase64(_photoPath);
-      if (photo != null) body['photo_base64'] = photo;
-      final recto = await _fileToBase64(_docRectoPath);
-      if (recto != null) body['document_recto_base64'] = recto;
-      final verso = await _fileToBase64(_docVersoPath);
-      if (verso != null) body['document_verso_base64'] = verso;
+      // Les images sont recopiées dans le dossier persistant ; seule leur
+      // référence part en base. L'encodage base64 n'aura lieu qu'à l'envoi.
+      final images = await Future.wait([
+        VisitMedia.persist(_photoPath, 'photo'),
+        VisitMedia.persist(_docRectoPath, 'recto'),
+        VisitMedia.persist(_docVersoPath, 'verso'),
+      ]);
+      if (images[0] != null) body['photo_path'] = images[0];
+      if (images[1] != null) body['document_recto_path'] = images[1];
+      if (images[2] != null) body['document_verso_path'] = images[2];
 
       await provider.createVisite(t, body);
+
+      // Les originaux (cache du scanner ou du selecteur d'images) ont ete
+      // recopies dans le dossier persistant : ils ne servent plus a rien.
+      for (final chemin in [_photoPath, _docRectoPath, _docVersoPath]) {
+        if (chemin != null && !chemin.startsWith(VisitMedia.scheme)) {
+          File(chemin).delete().catchError((_) => File(chemin));
+        }
+      }
 
       if (mounted) {
         Navigator.pushReplacementNamed(context, '/visit-success');
@@ -730,46 +866,18 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
                       _buildDropdown('Type de visite', _typesVisite, _selectedTypeVisiteId, 'nom', (v) => setState(() => _selectedTypeVisiteId = v)),
                       if (_isHorsNormes) ...[
                         const SizedBox(height: 12),
-                        _buildDropdown('Département', _departements, _selectedDepartementId, 'nom', (v) {
-                          setState(() {
-                            _selectedDepartementId = v;
-                            if (_selectedPersonnelId != null) {
-                              final stillIn = _filteredPersonnel.any((p) {
-                                final pid = p['id'];
-                                final pIdInt = pid is int ? pid : int.tryParse(pid?.toString() ?? '');
-                                return pIdInt == _selectedPersonnelId;
-                              });
-                              if (!stillIn) _selectedPersonnelId = null;
-                            }
-                          });
-                        }),
-                        if (_selectedDepartementId != null) ...[
-                          const SizedBox(height: 12),
-                          _buildDropdown('Personnel', _filteredPersonnel, _selectedPersonnelId, 'nom', (v) {
-                            setState(() {
-                              _selectedPersonnelId = v;
-                              if (v != null) {
-                                final person = _filteredPersonnel.firstWhere(
-                                  (p) {
-                                    final pid = p['id'];
-                                    if (pid is int) return pid == v;
-                                    if (pid is String) return int.tryParse(pid) == v;
-                                    return pid.toString() == v.toString();
-                                  },
-                                  orElse: () => {},
-                                );
-                                if (person.isNotEmpty) {
-                                  final depId = person['departement_id'];
-                                  if (depId is int) {
-                                    _selectedDepartementId = depId;
-                                  } else if (depId is String) {
-                                    _selectedDepartementId = int.tryParse(depId);
-                                  }
-                                }
-                              }
-                            });
-                          }),
-                        ],
+                        _buildDropdown('Département', _departements,
+                            _selectedDepartementId, 'nom', _onDepartementChanged),
+                        const SizedBox(height: 12),
+                        _buildDropdown(
+                          _selectedDepartementId == null
+                              ? 'Personnel * (tous départements)'
+                              : 'Personnel *',
+                          _personnelChoices,
+                          _selectedPersonnelId,
+                          'nom',
+                          _onPersonnelChanged,
+                        ),
                       ],
                       const SizedBox(height: 12),
                       _buildField('Badge', _badgeCtrl, icon: Icons.badge),

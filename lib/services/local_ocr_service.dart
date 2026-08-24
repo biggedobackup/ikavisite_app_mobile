@@ -5,6 +5,24 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_document_reader_api/flutter_document_reader_api.dart' hide File;
 
+/// Lecture OCR d'une piece d'identite, hors ligne.
+///
+/// Regula a besoin d'une base de reference — `db.dat`, environ 72 Mo — qui
+/// decrit le format des documents d'identite du monde entier. Ce n'est pas une
+/// donnee de visiteur : rien de ce qui est scanne n'y est ecrit.
+///
+/// Cette base n'est volontairement PAS transmise depuis Dart via
+/// `InitConfig.customDb`. Ce chemin coutait tres cher a chaque lancement :
+/// les 72 Mo etaient lus dans le tas Dart, encodes en base64 (+33 %), passes
+/// en texte par le canal de methodes, redecodes cote Java — six copies du
+/// meme fichier, pres de 480 Mo de pic memoire et plusieurs secondes de
+/// thread UI bloque. Pire, le SDK reecrivait les 72 Mo dans la memoire
+/// interne a *chaque* initialisation.
+///
+/// Sans `customDb`, le SDK lit lui-meme `Regula/db.dat` depuis les assets
+/// natifs (`android/app/src/main/assets/Regula/db.dat`) et le recopie en flux,
+/// une seule fois par installation ou mise a jour de l'application. Rien ne
+/// transite par Dart, et les lancements suivants ne copient plus rien.
 class LocalOcrService {
   static final LocalOcrService _instance = LocalOcrService._internal();
   factory LocalOcrService() => _instance;
@@ -23,16 +41,8 @@ class LocalOcrService {
     final initConfig = InitConfig(licenseData);
     initConfig.delayedNNLoad = true;
     initConfig.licenseUpdate = false;
-
-    try {
-      final dbData = await rootBundle.load('assets/Regula/db.dat');
-      initConfig.customDb = dbData;
-      debugPrint('[LocalOcrService] Base db.dat chargée (${dbData.lengthInBytes} octets).');
-    } catch (e) {
-      debugPrint('[LocalOcrService] db.dat introuvable dans les assets Flutter : $e');
-      _initError = 'Base Regula absente (assets/Regula/db.dat).';
-    }
-
+    // `customDb` reste nul : le SDK va chercher la base dans les assets
+    // natifs. Voir la note de classe.
     return initConfig;
   }
 
@@ -50,10 +60,23 @@ class LocalOcrService {
 
     try {
       final documentReader = DocumentReader.instance;
-      final initConfig = await _buildInitConfig();
-      if (initConfig.customDb == null) return false;
 
+      // Le moteur natif reste initialise pour toute la duree du processus (et
+      // survit a un hot restart). Inutile de relire puis de re-encoder les
+      // ~75 Mo de db.dat dans ce cas : c'est ce transfert qui gele le thread UI.
+      if (await documentReader.isReady) {
+        _isInitialized = true;
+        _initError = null;
+        return true;
+      }
+
+      final initConfig = await _buildInitConfig();
       final (success, error) = await documentReader.initialize(initConfig);
+      // Une base absente ou illisible n'empeche pas l'initialisation de
+      // reussir : elle laisse simplement la liste des scenarios vide, et tout
+      // scan echouera ensuite sans explication. On la trace donc une fois.
+      debugPrint('[LocalOcrService] Scenarios reconnus : '
+          '${documentReader.availableScenarios.length}');
 
       if (error != null) {
         if (error.message.contains("initialized already") ||
@@ -83,24 +106,6 @@ class LocalOcrService {
       return success;
     } catch (e) {
       _initError = e.toString();
-      return false;
-    }
-  }
-
-  Future<bool> downloadDatabase(void Function(double progress) onProgress) async {
-    try {
-      final documentReader = DocumentReader.instance;
-      final (success, error) = await documentReader.prepareDatabase("Full", (progress) {
-        final percentage = progress.progress / 100.0;
-        onProgress(percentage);
-      });
-      if (error != null) {
-        _initError = "Téléchargement échoué: ${error.code} - ${error.message}";
-        return false;
-      }
-      return success;
-    } catch (e) {
-      _initError = "Exception de téléchargement: $e";
       return false;
     }
   }
@@ -233,10 +238,13 @@ class LocalOcrService {
 
     final docClassCode = await results.textFieldValueByType(FieldType.DOCUMENT_CLASS_CODE);
     final docClassName = await results.textFieldValueByType(FieldType.DOCUMENT_CLASS_NAME);
+    debugPrint('[LocalOcrService] Classe du document : code=$docClassCode nom=$docClassName');
     String? typeDoc;
     if (docClassCode != null) {
       typeDoc = _getTypeFromDocCode(docClassCode);
-    } else if (docClassName != null) {
+    }
+    // Le code seul peut etre ambigu (AUTRE) alors que le libelle est clair.
+    if ((typeDoc == null || typeDoc == 'AUTRE') && docClassName != null) {
       typeDoc = _getTypeFromDocName(docClassName);
     }
     champs['Type de document'] = typeDoc ?? 'AUTRE';
@@ -316,12 +324,17 @@ class LocalOcrService {
     return '${century + yy}-$mm-$dd';
   }
 
+  /// Code de classe ICAO 9303. Les cartes d'identite utilisent `I`, `ID`,
+  /// `IN`, `C` ou `A` selon les pays — la CNI ivoirienne emet `I`, que
+  /// l'ancien test `== ID` classait a tort en AUTRE.
   String _getTypeFromDocCode(String code) {
     code = code.toUpperCase();
     if (code.startsWith('P')) return 'PASSEPORT';
     if (code.startsWith('V')) return 'VISA';
-    if (code.startsWith('DL')) return 'PERMIS';
-    if (code.startsWith('ID')) return 'CNI';
+    if (code.startsWith('D')) return 'PERMIS';
+    if (code.startsWith('I') || code.startsWith('C') || code.startsWith('A')) {
+      return 'CNI';
+    }
     return 'AUTRE';
   }
 
@@ -330,7 +343,7 @@ class LocalOcrService {
     if (name.contains('PASSPORT') || name.contains('PASSEPORT')) return 'PASSEPORT';
     if (name.contains('VISA')) return 'VISA';
     if (name.contains('DRIVING') || name.contains('DRIVER') || name.contains('PERMIS') || name.contains('LICENCE')) return 'PERMIS';
-    if (name.contains('ID CARD') || name.contains('IDENTITY') || name.contains('CARTE')) return 'CNI';
+    if (name.contains('ID CARD') || name.contains('IDENTITY') || name.contains('CARTE') || name.contains('IDENTIT')) return 'CNI';
     return 'AUTRE';
   }
 
@@ -353,6 +366,22 @@ class LocalOcrService {
     }
 
     return Scenario.OCR;
+  }
+
+  /// Libere le moteur natif — environ 250 Mo de memoire — quand le scan est
+  /// termine. La base sur disque reste en place : la prochaine ouverture de
+  /// l'ecran de scan reinitialisera le moteur en arriere-plan (~2 s).
+  Future<void> release() async {
+    try {
+      await _pendingInit; // ne jamais couper une initialisation en cours
+    } catch (_) {}
+    try {
+      DocumentReader.instance.deinitializeReader();
+      _isInitialized = false;
+      debugPrint('[LocalOcrService] Moteur libéré.');
+    } catch (e) {
+      debugPrint('[LocalOcrService] Libération impossible : $e');
+    }
   }
 
   Future<bool> reinitialize() async {

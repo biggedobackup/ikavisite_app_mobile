@@ -42,6 +42,7 @@ class _EditVisitScreenState extends State<EditVisitScreen> {
   int? _selectedPorteEntreeId;
   int? _selectedPersonnelId;
   int? _selectedDepartementId;
+  bool _isHorsNormes = true;
   String? _selectedGenre;
   String? _selectedNationalite;
   String? _selectedPays;
@@ -112,6 +113,7 @@ class _EditVisitScreenState extends State<EditVisitScreen> {
       if ((_typesVisite.isNotEmpty || _portesEntree.isNotEmpty) && initialVisit != null) {
         setState(() => _loading = false);
       }
+      if (initialVisit != null) _checkVisitMode();
     }
 
     if (!mounted) return;
@@ -145,6 +147,7 @@ class _EditVisitScreenState extends State<EditVisitScreen> {
             _loading = false;
           });
           await _saveDropdownsToCache();
+          _checkVisitMode();
         }
       } catch (e) {
         debugPrint('[EditVisitScreen] Échec du rafraîchissement des dropdowns/détails : $e');
@@ -245,6 +248,99 @@ class _EditVisitScreenState extends State<EditVisitScreen> {
     }
   }
 
+  int? _asId(Object? raw) => raw is int ? raw : int.tryParse(raw?.toString() ?? '');
+
+  /// Libellés joints à la modification (clés privées, jamais envoyées à
+  /// l'API) : ils tiennent à jour la fiche des visites hors ligne.
+  void _ajouterLibelles(Map<String, dynamic> body) {
+    Map<String, dynamic> trouve(List<Map<String, dynamic>> items, int? id) =>
+        items.firstWhere((e) => _asId(e['id']) == id,
+            orElse: () => const <String, dynamic>{});
+
+    final tv = trouve(_typesVisite, _selectedTypeVisiteId);
+    if (tv['nom'] != null) body['_type_visite_nom'] = tv['nom'];
+    if (tv['description'] != null) {
+      body['_type_visite_description'] = tv['description'];
+    }
+
+    final pe = trouve(_portesEntree, _selectedPorteEntreeId);
+    if (pe['titre'] != null) body['_porte_entree_titre'] = pe['titre'];
+    if (pe['emplacement'] != null) {
+      body['_porte_entree_emplacement'] = pe['emplacement'];
+    }
+
+    final p = trouve(_personnel, _selectedPersonnelId);
+    if (p['nom'] != null) body['_personnel_nom'] = p['nom'];
+    if (p['prenom'] != null) body['_personnel_prenom'] = p['prenom'];
+    if (p['fonction'] != null) body['_personnel_fonction'] = p['fonction'];
+    final dep = p['departement_nom'] ?? p['departement'];
+    if (dep is String) body['_personnel_departement'] = dep;
+  }
+
+  List<Map<String, dynamic>> get _filteredPersonnel {
+    if (_selectedDepartementId == null) return [];
+    return _personnel
+        .where((p) => _asId(p['departement_id']) == _selectedDepartementId)
+        .toList();
+  }
+
+  /// Liste proposee pour « Personnel » : restreinte au departement choisi, ou
+  /// l'effectif complet tant qu'aucun departement ne l'est.
+  List<Map<String, dynamic>> get _personnelChoices =>
+      _selectedDepartementId == null ? _personnel : _filteredPersonnel;
+
+  void _onDepartementChanged(int? v) {
+    setState(() {
+      _selectedDepartementId = v;
+      if (_selectedPersonnelId != null &&
+          !_personnelChoices.any((p) => _asId(p['id']) == _selectedPersonnelId)) {
+        _selectedPersonnelId = null;
+      }
+    });
+  }
+
+  void _onPersonnelChanged(int? v) {
+    setState(() {
+      _selectedPersonnelId = v;
+      if (v == null) return;
+      final person = _personnel.firstWhere(
+        (p) => _asId(p['id']) == v,
+        orElse: () => <String, dynamic>{},
+      );
+      final depId = _asId(person['departement_id']);
+      if (depId != null) _selectedDepartementId = depId;
+    });
+  }
+
+  /// A l'ouverture, la visite ne porte que l'identifiant du personnel : on en
+  /// deduit le departement pour que les deux listes soient coherentes.
+  void _applyDepartementFromPersonnel() {
+    final personnelId = _selectedPersonnelId;
+    if (personnelId == null || _selectedDepartementId != null) return;
+    final person = _personnel.firstWhere(
+      (p) => _asId(p['id']) == personnelId,
+      orElse: () => <String, dynamic>{},
+    );
+    final depId = _asId(person['departement_id']);
+    if (depId != null) _selectedDepartementId = depId;
+  }
+
+  /// Meme regle que sur la creation : departement et personnel ne sont
+  /// proposes que si aucun creneau ne couvre l'horaire de la visite.
+  Future<void> _checkVisitMode() async {
+    final parts = _arriveeCtrl.text.split(' ');
+    if (parts.length != 2) return;
+    final t = _getToken();
+    if (t == null) return;
+    try {
+      final mode = await _service.checkMode(t, date: parts[0], heure: parts[1]);
+      if (!mounted) return;
+      setState(() => _isHorsNormes = mode['mode'] == 'HORS_NORMES');
+    } catch (e) {
+      debugPrint('[EditVisitScreen] check-mode indisponible (mode inconnu): $e');
+    }
+  }
+
   void _fillFromVisit(Visit v) {
     _nomCtrl.text = v.visiteur?.nom ?? '';
     _prenomCtrl.text = v.visiteur?.prenom ?? '';
@@ -268,6 +364,7 @@ class _EditVisitScreenState extends State<EditVisitScreen> {
     _selectedTypeVisiteId = v.typeVisiteId;
     _selectedPorteEntreeId = v.porteEntreeId;
     _selectedPersonnelId = v.personnelId;
+    _applyDepartementFromPersonnel();
     _motifCtrl.text = v.motif ?? '';
     _observationsCtrl.text = v.observations ?? '';
     _badgeCtrl.text = v.numeroBadge ?? '';
@@ -328,13 +425,15 @@ class _EditVisitScreenState extends State<EditVisitScreen> {
       if (_selectedNationalite != null) body['v_nationalite'] = _selectedNationalite;
       if (_selectedPays != null) body['v_pays_delivrance'] = _selectedPays;
       if (_selectedTypePiece != null) body['v_piece_identite'] = _selectedTypePiece;
+      _ajouterLibelles(body);
 
-      final success = await context.read<VisitProvider>().updateVisite(t, widget.visiteId, body);
+      final provider = context.read<VisitProvider>();
+      final success = await provider.updateVisite(t, widget.visiteId, body);
       if (mounted) {
         final online = context.read<ConnectivityProvider>().isConnected;
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(!success
-              ? 'Échec de l\'enregistrement local'
+              ? (provider.error ?? 'Échec de l\'enregistrement local')
               : online
                   ? 'Visite modifiée avec succès'
                   : 'Modification enregistrée localement, synchronisation en attente'),
@@ -552,35 +651,21 @@ class _EditVisitScreenState extends State<EditVisitScreen> {
                     const SizedBox(height: 8),
                     _buildCard([
                       _buildDropdown('Type de visite', _typesVisite, _selectedTypeVisiteId, 'nom', (v) => setState(() => _selectedTypeVisiteId = v)),
-                      const SizedBox(height: 12),
-                      _buildDropdown('Porte d\'entrée', _portesEntree, _selectedPorteEntreeId, 'titre', (v) => setState(() => _selectedPorteEntreeId = v)),
-                      const SizedBox(height: 12),
-                      _buildDropdown('Personnel', _personnel, _selectedPersonnelId, 'nom', (v) {
-                        setState(() {
-                          _selectedPersonnelId = v;
-                          if (v != null) {
-                            final person = _personnel.firstWhere(
-                              (p) {
-                                final pid = p['id'];
-                                if (pid is int) return pid == v;
-                                if (pid is String) return int.tryParse(pid) == v;
-                                return pid.toString() == v.toString();
-                              },
-                              orElse: () => {},
-                            );
-                            if (person.isNotEmpty) {
-                              final depId = person['departement_id'];
-                              if (depId is int) {
-                                _selectedDepartementId = depId;
-                              } else if (depId is String) {
-                                _selectedDepartementId = int.tryParse(depId);
-                              }
-                            }
-                          }
-                        });
-                      }),
-                      const SizedBox(height: 12),
-                      _buildDropdown('Département', _departements, _selectedDepartementId, 'nom', (v) => setState(() => _selectedDepartementId = v)),
+                      if (_isHorsNormes) ...[
+                        const SizedBox(height: 12),
+                        _buildDropdown('Département', _departements,
+                            _selectedDepartementId, 'nom', _onDepartementChanged),
+                        const SizedBox(height: 12),
+                        _buildDropdown(
+                          _selectedDepartementId == null
+                              ? 'Personnel (tous départements)'
+                              : 'Personnel',
+                          _personnelChoices,
+                          _selectedPersonnelId,
+                          'nom',
+                          _onPersonnelChanged,
+                        ),
+                      ],
                       const SizedBox(height: 12),
                       _buildField('Badge', _badgeCtrl, icon: Icons.badge),
                       const SizedBox(height: 12),

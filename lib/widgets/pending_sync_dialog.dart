@@ -103,13 +103,23 @@ class _PendingSyncDialogState extends State<PendingSyncDialog> {
                   final item = _items[i];
                   final id = item['id'] as int;
                   final action = item['action'] as String;
+                  final bloque = (item['status'] as int? ?? 0) == 2;
+                  final tentatives = item['tentatives'] as int? ?? 0;
                   return ListTile(
                     dense: true,
-                    leading: const Icon(Icons.sync_rounded, size: 20),
+                    leading: Icon(
+                        bloque ? Icons.error_outline_rounded : Icons.sync_rounded,
+                        size: 20,
+                        color: bloque ? Colors.red : null),
                     title: Text(_actionLabel(action),
                         style: const TextStyle(fontSize: 13.5)),
-                    subtitle: Text(_formatDate(item['created_at'] as String?),
-                        style: const TextStyle(fontSize: 11.5)),
+                    subtitle: Text(
+                        bloque
+                            ? '${_formatDate(item['created_at'] as String?)} · refusé après $tentatives tentatives'
+                            : _formatDate(item['created_at'] as String?),
+                        style: TextStyle(
+                            fontSize: 11.5,
+                            color: bloque ? Colors.red : null)),
                     trailing: IconButton(
                       icon: const Icon(Icons.delete_outline,
                           color: Colors.red, size: 20),

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
+import '../providers/sync_provider.dart';
 import '../models/user.dart';
 import '../widgets/skeleton_loader.dart';
 
@@ -75,11 +76,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> _logout() async {
+    final pending = context.read<SyncProvider>().pendingCount;
     final confirm = await showDialog<bool>(
       context: context,
       builder: (dialogCtx) => AlertDialog(
         title: const Text('Déconnexion'),
-        content: const Text('Voulez-vous vous déconnecter ?'),
+        content: Text(pending > 0
+            ? 'Voulez-vous vous déconnecter ?\n\n$pending élément(s) ne sont pas encore synchronisés. Ils seront conservés sur l’appareil et envoyés à la prochaine connexion.'
+            : 'Voulez-vous vous déconnecter ?'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(dialogCtx, false), child: const Text('Annuler')),
           TextButton(

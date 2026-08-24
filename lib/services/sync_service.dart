@@ -1,7 +1,9 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import '../database/database_helper.dart';
+import '../models/visit.dart';
 import '../services/auth_service.dart';
+import '../services/visit_media.dart';
 import '../services/visit_service.dart';
 
 class SyncService {
@@ -9,6 +11,15 @@ class SyncService {
   final AuthService _authService = AuthService();
   final VisitService _visitService = VisitService();
   bool _isProcessing = false;
+
+  /// Prévient l'application qu'une saisie hors ligne vient d'être créée côté
+  /// serveur, pour que la copie locale cède la place à la visite serveur.
+  Future<void> Function(int pendingId, Visit visit, bool terminee)?
+      onVisiteCreee;
+
+  /// Au-delà de ce nombre d'échecs, l'envoi est mis de côté (statut 2) au lieu
+  /// d'être réessayé indéfiniment à chaque synchronisation.
+  static const int _maxTentatives = 5;
 
   bool get isProcessing => _isProcessing;
 
@@ -38,6 +49,11 @@ class SyncService {
 
   Future<void> _processQueue(
       String accessToken, Future<bool> Function()? onUnauthorized) async {
+    // Un envoi interrompu — application fermée pendant la requête — resterait
+    // bloqué en statut 1 et ne serait jamais repris. On le remet en file.
+    await _db.update('pending_sync', {'status': 0},
+        where: 'status = ?', whereArgs: [1]);
+
     final pending = await _db.query('pending_sync',
         where: 'status = ?', whereArgs: [0], orderBy: 'created_at ASC');
 
@@ -48,6 +64,7 @@ class SyncService {
     for (final item in pending) {
       final id = item['id'] as int;
       final action = item['action'] as String;
+      final tentatives = (item['tentatives'] as int?) ?? 0;
       final payload =
           jsonDecode(item['payload'] as String) as Map<String, dynamic>;
 
@@ -55,7 +72,7 @@ class SyncService {
           where: 'id = ?', whereArgs: [id]);
 
       try {
-        await _processAction(action, payload, accessToken);
+        await _processAction(id, action, payload, accessToken);
         await _db.delete('pending_sync',
             where: 'id = ?', whereArgs: [id]);
         debugPrint('SyncService: completed $action (#$id)');
@@ -65,23 +82,28 @@ class SyncService {
 
         if ((msg.contains('401') || msg.contains('Unauthorized')) &&
             onUnauthorized != null) {
-          final refreshed = await onUnauthorized();
-          if (refreshed) {
-            await _db.update('pending_sync', {'status': 0},
-                where: 'id = ?', whereArgs: [id]);
-          } else {
-            await _db.update('pending_sync', {'status': 0},
-                where: 'id = ?', whereArgs: [id]);
-          }
-        } else {
+          // L'échec vient de la session, pas de l'enregistrement : il ne
+          // compte pas comme une tentative.
+          await onUnauthorized();
           await _db.update('pending_sync', {'status': 0},
+              where: 'id = ?', whereArgs: [id]);
+          continue;
+        }
+
+        final essais = tentatives + 1;
+        if (essais >= _maxTentatives) {
+          await _db.update('pending_sync', {'status': 2, 'tentatives': essais},
+              where: 'id = ?', whereArgs: [id]);
+          debugPrint('SyncService: $action (#$id) mis de côté après $essais tentatives');
+        } else {
+          await _db.update('pending_sync', {'status': 0, 'tentatives': essais},
               where: 'id = ?', whereArgs: [id]);
         }
       }
     }
   }
 
-  Future<void> _processAction(
+  Future<void> _processAction(int pendingId,
       String action, Map<String, dynamic> payload, String accessToken) async {
     switch (action) {
       case 'update_profile':
@@ -96,7 +118,9 @@ class SyncService {
       case 'create_visite':
         final terminerApres = payload.remove('_terminer_apres_creation') == true;
         final terminationBody = payload.remove('_termination_body') as Map<String, dynamic>?;
-        final created = await _visitService.createVisite(accessToken, payload);
+        // Les images ne sont encodées qu'ici, juste avant de partir.
+        final created = await _visitService.createVisite(
+            accessToken, await VisitMedia.toApiBody(payload));
         if (terminerApres) {
           try {
             await _visitService.terminerVisite(accessToken, created.id, body: terminationBody);
@@ -108,15 +132,21 @@ class SyncService {
             });
           }
         }
+        await VisitMedia.discard(payload);
+        try {
+          await onVisiteCreee?.call(pendingId, created, terminerApres);
+        } catch (e) {
+          debugPrint('SyncService: remplacement de la copie locale échoué : $e');
+        }
         break;
       case 'update_visite':
         final id = payload['_visite_id'] as int;
-        payload.remove('_visite_id');
+        payload.removeWhere((k, _) => k.startsWith('_'));
         await _visitService.updateVisite(accessToken, id, payload);
         break;
       case 'terminer_visite':
         final id = payload['_visite_id'] as int;
-        payload.remove('_visite_id');
+        payload.removeWhere((k, _) => k.startsWith('_'));
         await _visitService.terminerVisite(accessToken, id, body: payload);
         break;
       default:

@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -8,6 +8,7 @@ import '../config/api_config.dart';
 import '../providers/auth_provider.dart';
 import '../providers/visit_provider.dart';
 import '../models/visit.dart';
+import '../services/visit_media.dart';
 import '../widgets/skeleton_loader.dart';
 import 'edit_visit_screen.dart';
 
@@ -60,15 +61,20 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
         t, widget.visiteId,
         onUnauthorized: () async => context.read<AuthProvider>().refreshAccessToken(),
       );
+      // Les images sont decodees AVANT d'etre posees dans le state : sinon le
+      // premier build les decodait lui-meme, sur le thread UI.
+      final decoded = await _decodeImagesFor(visit);
       if (mounted) {
         setState(() {
           _visit = visit;
+          _decodedImages
+            ..clear()
+            ..addAll(decoded);
           _isLoading = false;
           if (visit == null) {
             _error = 'Aucune donnée disponible hors ligne';
           }
         });
-        _predecodeImages(visit);
 
         // If we got data from cache/list, refresh from API in background
         if (visit != null && mounted) {
@@ -77,12 +83,17 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
             t, widget.visiteId,
             onUnauthorized: () async => context.read<AuthProvider>().refreshAccessToken(),
           );
+          final refreshedImages = await _decodeImagesFor(refreshed);
           if (mounted) {
             setState(() {
-              if (refreshed != null) _visit = refreshed;
+              if (refreshed != null) {
+                _visit = refreshed;
+                _decodedImages
+                  ..clear()
+                  ..addAll(refreshedImages);
+              }
               _isRefreshing = false;
             });
-            _predecodeImages(refreshed);
           }
         }
       }
@@ -137,9 +148,16 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
     );
   }
 
-  void _predecodeImages(Visit? visit) {
-    if (visit == null) return;
-    _decodedImages.clear();
+  /// Au-dela de ce volume de base64, le decodage part sur un isolate. En
+  /// dessous, le cout de demarrage de l'isolate depasserait le decodage.
+  static const int _isolateDecodeThreshold = 256 * 1024;
+
+  /// Decode les images base64 de la visite hors du thread UI quand elles sont
+  /// volumineuses (photos venant du back-office, non redimensionnees).
+  Future<Map<String, Uint8List>> _decodeImagesFor(Visit? visit) async {
+    if (visit == null) return const {};
+
+    final raws = <String>[];
     for (final raw in [
       visit.visiteur?.photo,
       visit.visiteur?.documentRecto,
@@ -148,15 +166,34 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
       visit.signatureSortie,
     ]) {
       if (raw == null || raw.isEmpty || raw.startsWith('http') || raw.startsWith('/')) continue;
+      if (VisitMedia.isLocal(raw)) continue;
+      raws.add(raw);
+    }
+    if (raws.isEmpty) return const {};
+
+    final total = raws.fold<int>(0, (sum, raw) => sum + raw.length);
+    return total > _isolateDecodeThreshold
+        ? compute(_decodeBase64Images, raws)
+        : _decodeBase64Images(raws);
+  }
+
+  static Map<String, Uint8List> _decodeBase64Images(List<String> raws) {
+    final out = <String, Uint8List>{};
+    for (final raw in raws) {
       if (raw.startsWith('data:image')) {
-        try { _decodedImages[raw] = base64.decode(raw.split(',').last); } catch (_) {}
+        try { out[raw] = base64.decode(raw.split(',').last); } catch (_) {}
       } else if (raw.length > 200 && !raw.contains('.')) {
-        try { _decodedImages[raw] = base64.decode(raw); } catch (_) {}
+        try {
+          final decoded = base64.decode(raw);
+          if (decoded.length > 100) out[raw] = decoded;
+        } catch (_) {}
       }
     }
+    return out;
   }
 
   Uint8List? _getDecodedImage(String raw) {
+    if (VisitMedia.isLocal(raw)) return null;
     if (_decodedImages.containsKey(raw)) return _decodedImages[raw];
     if (raw.startsWith('data:image')) {
       try {
@@ -259,7 +296,6 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
           ]),
           const SizedBox(height: 12),
           _buildSection('Signatures', [
-            _buildImageRow('Signature d\'entrée', v.signatureEntree),
             _buildImageRow('Signature de sortie', v.signatureSortie),
           ]),
           const SizedBox(height: 12),
@@ -267,7 +303,6 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
             _buildDetailRow(Icons.calendar_today, 'Date', v.dateVisite ?? '-'),
             _buildDetailRow(Icons.access_time, 'Heure d\'arrivée', v.heureArrivee ?? '-'),
             _buildDetailRow(Icons.exit_to_app, 'Heure de départ', v.heureDepart ?? '-'),
-            _buildDetailRow(Icons.timer, 'Durée max', '${v.dureeMaxMinutes} min'),
             _buildDetailRow(Icons.flag, 'Motif', v.motif ?? '-'),
             if (v.observations != null && v.observations!.isNotEmpty)
               _buildDetailRow(Icons.note, 'Observations', v.observations!),
@@ -287,7 +322,6 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
           _buildSection('Type de visite', [
             _buildDetailRow(Icons.category, 'Nom', v.typeVisite?.nom ?? '-'),
             _buildDetailRow(Icons.description, 'Description', v.typeVisite?.description ?? '-'),
-            _buildDetailRow(Icons.timer, 'Durée max', '${v.typeVisite?.dureeMaxMinutes ?? '-'} min'),
           ]),
           const SizedBox(height: 12),
           _buildSection('Données du visiteur', [
@@ -411,6 +445,23 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
   }
 
   Widget _buildImageWidget(String imageData, {double? width, double height = 120}) {
+    // Image restée sur l'appareil : visite saisie hors ligne, pas encore
+    // synchronisée. On la lit directement depuis le disque.
+    final local = VisitMedia.resolve(imageData);
+    if (local != null) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: Image.file(
+          File(local),
+          width: width,
+          height: height,
+          fit: BoxFit.cover,
+          errorBuilder: (context, error, stack) => _imageErrorPlaceholder(height),
+          cacheHeight: (height * 0.8).round(),
+        ),
+      );
+    }
+
     final decoded = _getDecodedImage(imageData);
     if (decoded != null) {
       return ClipRRect(
