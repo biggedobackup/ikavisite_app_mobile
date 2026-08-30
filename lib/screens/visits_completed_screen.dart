@@ -70,10 +70,6 @@ class _VisitsCompletedScreenState extends State<VisitsCompletedScreen> {
         title: const Text('Visites terminées'),
         actions: [
           IconButton(icon: const Icon(Icons.refresh_rounded, color: AppColors.ikaBlue), onPressed: _loadVisits),
-          IconButton(
-            icon: const Icon(Icons.person_rounded, color: AppColors.ikaBlue),
-            onPressed: () => Navigator.pushNamed(context, '/profile'),
-          ),
         ],
       ),
       drawer: const AppDrawer(),

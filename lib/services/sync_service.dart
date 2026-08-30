@@ -13,8 +13,11 @@ class SyncService {
   bool _isProcessing = false;
 
   /// Prévient l'application qu'une saisie hors ligne vient d'être créée côté
-  /// serveur, pour que la copie locale cède la place à la visite serveur.
-  Future<void> Function(int pendingId, Visit visit, bool terminee)?
+  /// serveur, pour que la copie locale cède la place à la visite serveur. La
+  /// charge utile d'origine est transmise : elle porte les chemins des images
+  /// restées sur l'appareil, seules consultables hors connexion.
+  Future<void> Function(
+      int pendingId, Visit visit, bool terminee, Map<String, dynamic> payload)?
       onVisiteCreee;
 
   /// Au-delà de ce nombre d'échecs, l'envoi est mis de côté (statut 2) au lieu
@@ -132,9 +135,11 @@ class SyncService {
             });
           }
         }
-        await VisitMedia.discard(payload);
+        // Les images ne sont plus effacées ici : elles suivent la visite et
+        // restent affichables sans réseau. Le balayage des orphelines les
+        // retirera quand la visite quittera la base locale.
         try {
-          await onVisiteCreee?.call(pendingId, created, terminerApres);
+          await onVisiteCreee?.call(pendingId, created, terminerApres, payload);
         } catch (e) {
           debugPrint('SyncService: remplacement de la copie locale échoué : $e');
         }

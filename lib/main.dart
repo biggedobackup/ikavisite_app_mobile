@@ -14,6 +14,7 @@ import 'screens/splash_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/profile_screen.dart';
+import 'screens/help_screen.dart';
 import 'screens/add_visit_screen.dart';
 import 'screens/visit_success_screen.dart';
 import 'screens/visits_today_screen.dart';
@@ -56,8 +57,9 @@ class IkaVisiteApp extends StatelessWidget {
             // Une saisie hors ligne créée côté serveur remplace sa copie
             // locale : sans cela, la copie restait affichée et sa
             // modification échouait.
-            onVisiteCreee: (pendingId, visit, terminee) =>
-                visits.adoptServerVisit(pendingId, visit, terminee: terminee),
+            onVisiteCreee: (pendingId, visit, terminee, payload) =>
+                visits.adoptServerVisit(pendingId, visit,
+                    terminee: terminee, payload: payload),
           );
         }),
       ],
@@ -87,6 +89,7 @@ class IkaVisiteApp extends StatelessWidget {
           '/login': (_) => const LoginScreen(),
           '/dashboard': (_) => const DashboardScreen(),
           '/profile': (_) => const ProfileScreen(),
+          '/help': (_) => const HelpScreen(),
           '/add-visit': (_) => const AddVisitScreen(),
           '/visit-success': (_) => const VisitSuccessScreen(),
           '/visits-today': (_) => const VisitsTodayScreen(),

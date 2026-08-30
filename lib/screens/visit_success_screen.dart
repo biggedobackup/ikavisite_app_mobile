@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../constants/colors.dart';
 import '../utils/text_styles.dart';
+import 'scan.dart';
 
 class VisitSuccessScreen extends StatefulWidget {
   const VisitSuccessScreen({super.key});
@@ -169,10 +170,16 @@ class _VisitSuccessScreenState extends State<VisitSuccessScreen>
                         ),
                       ),
                       onPressed: () {
-                        Navigator.pushNamedAndRemoveUntil(
-                          context,
-                          '/add-visit',
+                        // Une nouvelle visite commence toujours par le scan de
+                        // la piece d'identite : on repose la pile sur le
+                        // tableau de bord, puis on ouvre directement le scan.
+                        final navigator = Navigator.of(context);
+                        navigator.pushNamedAndRemoveUntil(
+                          '/dashboard',
                           (route) => false,
+                        );
+                        navigator.push(
+                          MaterialPageRoute(builder: (_) => const ScanScreen()),
                         );
                       },
                       icon: const Icon(Icons.add_circle_outline_rounded),

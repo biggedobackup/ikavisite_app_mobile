@@ -3,22 +3,19 @@ import '../providers/sync_provider.dart';
 
 class PendingSyncDialog extends StatefulWidget {
   final SyncProvider provider;
-  final Future<void> Function(int id, String action) onDelete;
 
   const PendingSyncDialog({
     super.key,
     required this.provider,
-    required this.onDelete,
   });
 
   static Future<void> show(
     BuildContext context, {
     required SyncProvider provider,
-    required Future<void> Function(int id, String action) onDelete,
   }) {
     return showDialog(
       context: context,
-      builder: (_) => PendingSyncDialog(provider: provider, onDelete: onDelete),
+      builder: (_) => PendingSyncDialog(provider: provider),
     );
   }
 
@@ -56,31 +53,6 @@ class _PendingSyncDialogState extends State<PendingSyncDialog> {
     if (mounted) setState(() => _items = items);
   }
 
-  Future<void> _delete(int id, String action) async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (dialogCtx) => AlertDialog(
-        title: const Text('Abandonner cette opération ?'),
-        content: const Text(
-            'L\'opération sera supprimée de la file de synchronisation et ne sera jamais envoyée au serveur.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogCtx, false),
-            child: const Text('Annuler'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(dialogCtx, true),
-            child: const Text('Abandonner', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
-    );
-    if (confirm == true) {
-      await widget.onDelete(id, action);
-      await _load();
-    }
-  }
-
   @override
   void initState() {
     super.initState();
@@ -101,7 +73,6 @@ class _PendingSyncDialogState extends State<PendingSyncDialog> {
                 separatorBuilder: (_, _) => const Divider(height: 1),
                 itemBuilder: (_, i) {
                   final item = _items[i];
-                  final id = item['id'] as int;
                   final action = item['action'] as String;
                   final bloque = (item['status'] as int? ?? 0) == 2;
                   final tentatives = item['tentatives'] as int? ?? 0;
@@ -120,12 +91,6 @@ class _PendingSyncDialogState extends State<PendingSyncDialog> {
                         style: TextStyle(
                             fontSize: 11.5,
                             color: bloque ? Colors.red : null)),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.delete_outline,
-                          color: Colors.red, size: 20),
-                      tooltip: 'Abandonner',
-                      onPressed: () => _delete(id, action),
-                    ),
                   );
                 },
               ),

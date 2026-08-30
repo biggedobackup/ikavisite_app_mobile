@@ -98,10 +98,6 @@ class _VisitsOverdueScreenState extends State<VisitsOverdueScreen> {
         title: const Text('Visites excédées'),
         actions: [
           IconButton(icon: const Icon(Icons.refresh_rounded, color: AppColors.ikaBlue), onPressed: _loadVisits),
-          IconButton(
-            icon: const Icon(Icons.person_rounded, color: AppColors.ikaBlue),
-            onPressed: () => Navigator.pushNamed(context, '/profile'),
-          ),
         ],
       ),
       drawer: const AppDrawer(),

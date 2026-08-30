@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:signature/signature.dart';
@@ -197,6 +198,52 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
     return _matchDropdownValue(items, scanValue);
   }
 
+  /// Libelles admis pour chaque nature de piece renvoyee par le scan. Le
+  /// serveur nomme ses types comme il l'entend (« Carte nationale d'identite »,
+  /// « Permis de conduire »…) : sans cette passerelle, le rapprochement
+  /// echouait et le formulaire retombait sur « AUTRE ».
+  static const Map<String, List<String>> _synonymesTypePiece = {
+    'CNI': [
+      'CNI', 'CARTE NATIONALE', 'CARTE D IDENTITE', 'CARTE IDENTITE',
+      'IDENTITE', 'ID CARD', 'IDENTITY',
+    ],
+    'PASSEPORT': ['PASSEPORT', 'PASSPORT'],
+    'PERMIS': ['PERMIS', 'CONDUIRE', 'DRIVING', 'LICENCE', 'LICENSE'],
+    'VISA': ['VISA'],
+    'ATTESTATION': ['ATTESTATION'],
+    'CONSULAIRE': ['CONSULAIRE', 'CONSULAR'],
+  };
+
+  /// Rapprochement du type de piece scanne avec la liste du serveur : la
+  /// recherche generique d'abord, les synonymes ensuite.
+  String? _keepOrMatchTypePiece(
+      String? current, List<String> items, String? scanValue) {
+    final direct = _keepOrMatch(current, items, scanValue);
+    if (direct != null) return direct;
+    if (scanValue == null || scanValue.isEmpty || items.isEmpty) return null;
+
+    String sansAccents(String v) => v
+        .toUpperCase()
+        .replaceAll(RegExp(r'[ÀÁÂÃÄÅ]'), 'A')
+        .replaceAll(RegExp(r'[ÈÉÊË]'), 'E')
+        .replaceAll(RegExp(r'[ÌÍÎÏ]'), 'I')
+        .replaceAll(RegExp(r'[ÒÓÔÕÖ]'), 'O')
+        .replaceAll(RegExp(r'[ÙÚÛÜ]'), 'U')
+        .replaceAll('Ç', 'C')
+        .replaceAll(RegExp(r"[^A-Z0-9]+"), ' ')
+        .trim();
+
+    final cle = sansAccents(scanValue);
+    final motsCles = _synonymesTypePiece[cle];
+    if (motsCles == null) return null;
+    for (final mot in motsCles) {
+      for (final item in items) {
+        if (sansAccents(item).contains(mot)) return item;
+      }
+    }
+    return null;
+  }
+
   @override
   void dispose() {
     _visitorLookupDebounce?.cancel();
@@ -239,7 +286,8 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
         // Matching approximatif des valeurs du scan dans les dropdowns
         _selectedNationalite = _keepOrMatch(_selectedNationalite, _nationalites, _scanNationalite);
         _selectedPays = _keepOrMatch(_selectedPays, _pays, _scanPays);
-        _selectedTypePiece = _keepOrMatch(_selectedTypePiece, _typesPiece, _scanTypePiece);
+        _selectedTypePiece =
+            _keepOrMatchTypePiece(_selectedTypePiece, _typesPiece, _scanTypePiece);
         _applyDefaultPorteEntree();
       });
     }
@@ -273,7 +321,10 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
             // Recalculer les valeurs du scan correspondantes
             _selectedNationalite = _keepOrMatch(_selectedNationalite, _nationalites, _scanNationalite);
             _selectedPays = _keepOrMatch(_selectedPays, _pays, _scanPays);
-            _selectedTypePiece = _keepOrMatch(_selectedTypePiece, _typesPiece, _scanTypePiece);
+            _selectedTypePiece = _keepOrMatchTypePiece(
+                _selectedTypePiece, _typesPiece, _scanTypePiece);
+            debugPrint('[AddVisit] Type de piece scanne=$_scanTypePiece '
+                'retenu=$_selectedTypePiece parmi $_typesPiece');
             _applyDefaultPorteEntree();
 
             _loadingDropdowns = false;
@@ -604,6 +655,47 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
 
   String? _required(String? v) => (v == null || v.trim().isEmpty) ? 'Ce champ est obligatoire' : null;
   String? _requiredSelection(String? v) => (v == null || v.isEmpty) ? 'Veuillez selectionner une valeur' : null;
+  String? _requiredId(int? v) => v == null ? 'Veuillez selectionner une valeur' : null;
+
+  /// Nom et prenom : lettres, accents, tiret, apostrophe et espace.
+  static final RegExp _lettresSeules = RegExp(r"^[A-Za-zÀ-ÿ' -]+$");
+  static final RegExp _formatEmail = RegExp(r'^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$');
+  static final RegExp _formatReference = RegExp(r'^[A-Za-z0-9./-]+$');
+
+  String? _requiredNom(String? v) {
+    final erreur = _required(v);
+    if (erreur != null) return erreur;
+    if (!_lettresSeules.hasMatch(v!.trim())) {
+      return 'Chiffres et symboles ne sont pas admis';
+    }
+    return null;
+  }
+
+  /// Le telephone n'accepte que des chiffres — la saisie elle-meme filtre les
+  /// lettres — et il en faut au moins huit pour un numero exploitable.
+  String? _requiredTelephone(String? v) {
+    final erreur = _required(v);
+    if (erreur != null) return erreur;
+    final chiffres = v!.replaceAll(RegExp(r'[^0-9]'), '');
+    if (chiffres.length < 8) return 'Numero incomplet (8 chiffres minimum)';
+    if (chiffres.length > 15) return 'Numero trop long';
+    return null;
+  }
+
+  /// L'email reste facultatif, mais s'il est saisi il doit etre valide : une
+  /// adresse fautive part au serveur et casse la fiche du visiteur.
+  String? _emailFacultatif(String? v) {
+    if (v == null || v.trim().isEmpty) return null;
+    return _formatEmail.hasMatch(v.trim()) ? null : 'Adresse email invalide';
+  }
+
+  /// Numero de piece : lettres, chiffres, tiret, point et barre.
+  String? _requiredReference(String? v) {
+    final erreur = _required(v);
+    if (erreur != null) return erreur;
+    if (!_formatReference.hasMatch(v!.trim())) return 'Caracteres non admis';
+    return null;
+  }
   String? _requiredDateTime(String? v) {
     if (v == null || v.trim().isEmpty) return 'Ce champ est obligatoire';
     if (v.length < 16) return 'Format de date invalide';
@@ -826,19 +918,31 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
                     _buildSectionTitle('Informations du visiteur'),
                     const SizedBox(height: 8),
                     _buildCard([
-                      _buildField('Nom *', _nomCtrl, icon: Icons.person, validator: _required),
+                      _buildField('Nom *', _nomCtrl,
+                          icon: Icons.person,
+                          validator: _requiredNom,
+                          formatters: [FilteringTextInputFormatter.deny(RegExp(r'[0-9]'))]),
                       const SizedBox(height: 12),
-                      _buildField('Prénom *', _prenomCtrl, icon: Icons.person_outline, validator: _required),
+                      _buildField('Prénom *', _prenomCtrl,
+                          icon: Icons.person_outline,
+                          validator: _requiredNom,
+                          formatters: [FilteringTextInputFormatter.deny(RegExp(r'[0-9]'))]),
                       const SizedBox(height: 12),
                       _buildDropdownSimple('Genre *', ['HOMME', 'FEMME'], _selectedGenre, (v) => setState(() => _selectedGenre = v), validator: _requiredSelection),
                       const SizedBox(height: 12),
                       _buildDropdownSearch('Pays de delivrance', _pays, _selectedPays, (v) => setState(() => _selectedPays = v)),
                       const SizedBox(height: 12),
-                      _buildDropdownSearch('Type de pièce *', _typesPiece, _selectedTypePiece, (v) => setState(() => _selectedTypePiece = v), validator: _requiredSelection),
+                      _buildDropdownSearch('Type de pièce *', _typesPiece, _selectedTypePiece,
+                          (v) => setState(() => _selectedTypePiece = v),
+                          validator:
+                              _typesPiece.isEmpty ? null : _requiredSelection),
                       const SizedBox(height: 12),
                       _buildField('Profession', _professionCtrl, icon: Icons.work),
                       const SizedBox(height: 12),
-                      _buildField('N° Pièce *', _numeroPieceCtrl, icon: Icons.badge, validator: _required),
+                      _buildField('N° Pièce *', _numeroPieceCtrl,
+                          icon: Icons.badge,
+                          validator: _requiredReference,
+                          formatters: [FilteringTextInputFormatter.deny(RegExp(r'\s'))]),
                       const SizedBox(height: 12),
                       _buildField('NIP', _nipCtrl, icon: Icons.credit_card),
                       const SizedBox(height: 12),
@@ -850,24 +954,41 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
                       const SizedBox(height: 12),
                       _buildField('Date d\'expiration', _dateExpirationCtrl, icon: Icons.event, isDate: true),
                       const SizedBox(height: 12),
-                      _buildDropdownSearch('Nationalité', _nationalites, _selectedNationalite, (v) => setState(() => _selectedNationalite = v)),
+                      _buildDropdownSearch('Nationalité *', _nationalites, _selectedNationalite,
+                          (v) => setState(() => _selectedNationalite = v),
+                          validator:
+                              _nationalites.isEmpty ? null : _requiredSelection),
                       const SizedBox(height: 12),
                       _buildField('Adresse', _adresseCtrl, icon: Icons.home),
                       const SizedBox(height: 12),
-                      _buildField('Téléphone', _telephoneCtrl, icon: Icons.phone),
+                      _buildField('Téléphone *', _telephoneCtrl,
+                          icon: Icons.phone,
+                          validator: _requiredTelephone,
+                          keyboardType: TextInputType.phone,
+                          formatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9 +()-]'))]),
                       const SizedBox(height: 12),
-                      _buildField('Email', _emailCtrl, icon: Icons.email),
+                      _buildField('Email', _emailCtrl,
+                          icon: Icons.email,
+                          validator: _emailFacultatif,
+                          keyboardType: TextInputType.emailAddress,
+                          formatters: [FilteringTextInputFormatter.deny(RegExp(r'\s'))]),
                     ]),
                     const SizedBox(height: 20),
 
                     _buildSectionTitle('Détails de la visite'),
                     const SizedBox(height: 8),
                     _buildCard([
-                      _buildDropdown('Type de visite', _typesVisite, _selectedTypeVisiteId, 'nom', (v) => setState(() => _selectedTypeVisiteId = v)),
+                      _buildDropdown('Type de visite *', _typesVisite,
+                          _selectedTypeVisiteId, 'nom',
+                          (v) => setState(() => _selectedTypeVisiteId = v),
+                          validator: _typesVisite.isEmpty ? null : _requiredId),
+                      const SizedBox(height: 12),
+                      // Le departement est demande dans tous les cas : seule la
+                      // personne a visiter depend du creneau.
+                      _buildDropdown('Département *', _departements,
+                          _selectedDepartementId, 'nom', _onDepartementChanged,
+                          validator: _departements.isEmpty ? null : _requiredId),
                       if (_isHorsNormes) ...[
-                        const SizedBox(height: 12),
-                        _buildDropdown('Département', _departements,
-                            _selectedDepartementId, 'nom', _onDepartementChanged),
                         const SizedBox(height: 12),
                         _buildDropdown(
                           _selectedDepartementId == null
@@ -978,11 +1099,20 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
     );
   }
 
-  Widget _buildField(String label, TextEditingController ctrl, {IconData? icon, int maxLines = 1, bool isDate = false, bool readOnly = false, String? Function(String?)? validator}) {
+  Widget _buildField(String label, TextEditingController ctrl,
+      {IconData? icon,
+      int maxLines = 1,
+      bool isDate = false,
+      bool readOnly = false,
+      String? Function(String?)? validator,
+      TextInputType? keyboardType,
+      List<TextInputFormatter>? formatters}) {
     final ro = isDate || readOnly;
     return TextFormField(
       controller: ctrl, maxLines: maxLines, readOnly: ro, onTap: isDate ? () => _pickDate(ctrl) : null,
       validator: validator,
+      keyboardType: keyboardType,
+      inputFormatters: formatters,
       style: const TextStyle(fontSize: 14.5, color: AppColors.text),
       decoration: InputDecoration(
         labelText: label,
@@ -1036,12 +1166,15 @@ class _AddVisitScreenState extends State<AddVisitScreen> {
     );
   }
 
-  Widget _buildDropdown(String label, List<Map<String, dynamic>> items, int? selectedId, String fieldKey, ValueChanged<int?> onChanged) {
+  Widget _buildDropdown(String label, List<Map<String, dynamic>> items,
+      int? selectedId, String fieldKey, ValueChanged<int?> onChanged,
+      {String? Function(int?)? validator}) {
     final hasSelected = selectedId != null && items.any((item) => item['id'] == selectedId);
     final effectiveValue = hasSelected ? selectedId : null;
 
     return DropdownButtonFormField<int>(
       initialValue: effectiveValue, isExpanded: true,
+      validator: validator,
       style: const TextStyle(fontSize: 14.5, color: AppColors.text),
       decoration: InputDecoration(
         labelText: label,

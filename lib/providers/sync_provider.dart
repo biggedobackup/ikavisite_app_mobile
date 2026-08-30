@@ -19,7 +19,8 @@ class SyncProvider extends ChangeNotifier {
 
   SyncProvider(this._connectivity, this._getAccessToken,
       {Future<bool> Function()? onUnauthorized,
-      Future<void> Function(int pendingId, Visit visit, bool terminee)?
+      Future<void> Function(int pendingId, Visit visit, bool terminee,
+              Map<String, dynamic> payload)?
           onVisiteCreee})
       : _onUnauthorized = onUnauthorized {
     _syncService.onVisiteCreee = onVisiteCreee;

@@ -236,18 +236,7 @@ class LocalOcrService {
       }
     }
 
-    final docClassCode = await results.textFieldValueByType(FieldType.DOCUMENT_CLASS_CODE);
-    final docClassName = await results.textFieldValueByType(FieldType.DOCUMENT_CLASS_NAME);
-    debugPrint('[LocalOcrService] Classe du document : code=$docClassCode nom=$docClassName');
-    String? typeDoc;
-    if (docClassCode != null) {
-      typeDoc = _getTypeFromDocCode(docClassCode);
-    }
-    // Le code seul peut etre ambigu (AUTRE) alors que le libelle est clair.
-    if ((typeDoc == null || typeDoc == 'AUTRE') && docClassName != null) {
-      typeDoc = _getTypeFromDocName(docClassName);
-    }
-    champs['Type de document'] = typeDoc ?? 'AUTRE';
+    champs['Type de document'] = await _detecterTypeDocument(results) ?? 'AUTRE';
 
     final addressCountry = await results.textFieldValueByType(FieldType.ADDRESS_COUNTRY);
     if (addressCountry != null && addressCountry.trim().isNotEmpty) {
@@ -322,6 +311,85 @@ class LocalOcrService {
     int currentYear = DateTime.now().year % 100;
     int century = (yy <= currentYear + 5) ? 2000 : 1900;
     return '${century + yy}-$mm-$dd';
+  }
+
+  /// Nature du document scanne, cherchee dans l'ordre de fiabilite :
+  /// le type reconnu par la base Regula, puis les champs de classe, puis la
+  /// premiere lettre de la MRZ. Les champs texte `DOCUMENT_CLASS_*` sont vides
+  /// dans les scenarios OCR et MRZ, ce qui renvoyait « AUTRE » quel que soit
+  /// le document presente.
+  Future<String?> _detecterTypeDocument(Results results) async {
+    // 1) Type reconnu par la base de documents : le plus sur.
+    for (final doc in results.documentType ?? const <DocumentType>[]) {
+      final parEnum = _typeDepuisDocType(doc.type);
+      if (parEnum != null) {
+        debugPrint('[LocalOcrService] Type de document : ${doc.type.name} '
+            '(${doc.name}) -> $parEnum');
+        return parEnum;
+      }
+      final parNom = doc.name == null ? null : _getTypeFromDocName(doc.name!);
+      if (parNom != null && parNom != 'AUTRE') {
+        debugPrint('[LocalOcrService] Type de document (nom) : ${doc.name} -> $parNom');
+        return parNom;
+      }
+    }
+
+    // 2) Champs de classe du document, quand la base ne tranche pas.
+    final docClassCode =
+        await results.textFieldValueByType(FieldType.DOCUMENT_CLASS_CODE);
+    final docClassName =
+        await results.textFieldValueByType(FieldType.DOCUMENT_CLASS_NAME);
+    debugPrint('[LocalOcrService] Classe du document : code=$docClassCode nom=$docClassName');
+    if (docClassName != null) {
+      final parNom = _getTypeFromDocName(docClassName);
+      if (parNom != 'AUTRE') return parNom;
+    }
+    if (docClassCode != null && docClassCode.trim().isNotEmpty) {
+      final parCode = _getTypeFromDocCode(docClassCode);
+      if (parCode != 'AUTRE') return parCode;
+    }
+
+    // 3) MRZ : sa premiere lettre porte le code ICAO du document.
+    final mrz = await results.textFieldValueByType(FieldType.MRZ_STRINGS);
+    final parMrz = _typeDepuisMrz(mrz);
+    if (parMrz != null) {
+      debugPrint('[LocalOcrService] Type de document deduit de la MRZ : $parMrz');
+      return parMrz;
+    }
+    return null;
+  }
+
+  /// Traduit l'enumeration Regula — une centaine de valeurs — en s'appuyant
+  /// sur son libelle plutot que sur chaque code : `NationalIdentityCard`,
+  /// `DiplomaticPassport` ou `CommercialDrivingLicense` se rangent ainsi
+  /// d'eux-memes. L'ordre des tests compte : `ResidencePermitIdentityCard`
+  /// est une carte d'identite, pas un permis.
+  String? _typeDepuisDocType(DocType type) {
+    final nom = type.name.toUpperCase();
+    if (nom == 'NOTDEFINED' || nom == 'OTHER') return null;
+    if (nom.contains('PASSPORT')) return 'PASSEPORT';
+    if (nom.contains('IDENTITYCARD') || nom.contains('IDCARD')) return 'CNI';
+    if (nom.contains('VISA')) return 'VISA';
+    if (nom.contains('LICENSE') ||
+        nom.contains('LICENCE') ||
+        nom.contains('PERMIT')) {
+      return 'PERMIS';
+    }
+    if (nom.contains('IDENTITY')) return 'CNI';
+    return null;
+  }
+
+  /// Premiere ligne de la MRZ : `P` passeport, `V` visa, `A`/`C`/`I` carte
+  /// d'identite ou titre de sejour, `D` permis.
+  String? _typeDepuisMrz(String? mrz) {
+    if (mrz == null) return null;
+    final ligne = mrz
+        .split(RegExp(r'[\r\n]+'))
+        .map((l) => l.trim())
+        .firstWhere((l) => l.isNotEmpty, orElse: () => '');
+    if (ligne.isEmpty) return null;
+    final type = _getTypeFromDocCode(ligne.substring(0, 1));
+    return type == 'AUTRE' ? null : type;
   }
 
   /// Code de classe ICAO 9303. Les cartes d'identite utilisent `I`, `ID`,

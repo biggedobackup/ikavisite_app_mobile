@@ -12,9 +12,13 @@ class VisitService {
         'Authorization': 'Bearer $token',
       };
 
-  Future<VisitListResponse> getVisites(String token, {int page = 1, bool aujourdhui = false}) async {
+  Future<VisitListResponse> getVisites(String token,
+      {int page = 1, bool aujourdhui = false, int? visiteurId}) async {
     final queryParams = {'page': '$page'};
     if (aujourdhui) queryParams['aujourdhui'] = 'true';
+    // Filtre serveur pour l'historique d'un visiteur. Si l'API l'ignore, la
+    // reponse est simplement une page de visites : l'appelant refiltre.
+    if (visiteurId != null) queryParams['visiteur_id'] = '$visiteurId';
     final url = Uri.parse('${ApiConfig.baseUrl}${ApiConfig.visites}?${queryParams.entries.map((e) => '${e.key}=${e.value}').join('&')}');
 
     final response = await _client.get(url, headers: _headers(token)).timeout(Duration(seconds: ApiConfig.timeoutDefault));

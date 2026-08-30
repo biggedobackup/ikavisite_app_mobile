@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
 import '../providers/sync_provider.dart';
 import '../constants/colors.dart';
+import '../constants/app_info.dart';
 import '../screens/scan.dart';
 
 class AppDrawer extends StatelessWidget {
@@ -157,13 +158,19 @@ class AppDrawer extends StatelessWidget {
                     label: 'Mon profil',
                     route: '/profile',
                   ),
+                  _drawerItem(
+                    context: context,
+                    icon: Icons.help_outline_rounded,
+                    label: 'Aide',
+                    route: '/help',
+                  ),
                 ],
               ),
             ),
 
-            // ---- Pied : déconnexion ----
+            // ---- Pied : déconnexion et version ----
             Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 14),
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
               child: _drawerItem(
                 context: context,
                 icon: Icons.logout_rounded,
@@ -171,6 +178,14 @@ class AppDrawer extends StatelessWidget {
                 onTapOverride: () => _confirmLogout(context),
                 accent: AppColors.ikaRed,
               ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: Text('Version ${AppInfo.version}',
+                  style: const TextStyle(
+                      fontSize: 11.5,
+                      color: AppColors.textMuted,
+                      fontWeight: FontWeight.w500)),
             ),
           ],
         ),

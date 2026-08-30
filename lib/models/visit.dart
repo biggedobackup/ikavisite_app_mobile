@@ -323,6 +323,39 @@ class Visiteur {
     this.statut,
   });
 
+  /// Reprend le visiteur en remplacant ses seules images. Sert a garder les
+  /// fichiers restes sur l'appareil quand la visite passe cote serveur : ils
+  /// s'affichent alors sans reseau.
+  Visiteur copyWithImages({
+    String? photo,
+    String? documentRecto,
+    String? documentVerso,
+  }) {
+    return Visiteur(
+      id: id,
+      uuid: uuid,
+      nom: nom,
+      prenom: prenom,
+      genre: genre,
+      telephone: telephone,
+      email: email,
+      numeroPiece: numeroPiece,
+      numeroNip: numeroNip,
+      nationalite: nationalite,
+      profession: profession,
+      adresse: adresse,
+      pieceIdentite: pieceIdentite,
+      dateNaissance: dateNaissance,
+      lieuNaissance: lieuNaissance,
+      paysDelivrance: paysDelivrance,
+      dateDelivrance: dateDelivrance,
+      photo: photo ?? this.photo,
+      documentRecto: documentRecto ?? this.documentRecto,
+      documentVerso: documentVerso ?? this.documentVerso,
+      statut: statut,
+    );
+  }
+
   factory Visiteur.fromJson(Map<String, dynamic> json) {
     return Visiteur(
       id: _toInt(json['id']) ?? 0,

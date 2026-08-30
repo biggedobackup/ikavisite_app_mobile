@@ -162,10 +162,6 @@ void _loadStats() {
             icon: const Icon(Icons.refresh_rounded, color: kIkaBlue),
             onPressed: _loadStats,
           ),
-          IconButton(
-            icon: const Icon(Icons.person_rounded, color: kIkaBlue),
-            onPressed: () => Navigator.pushNamed(context, '/profile'),
-          ),
         ],
       ),
       body: Selector<DashboardProvider, DashboardStats?>(
@@ -294,8 +290,8 @@ void _loadStats() {
         if (!dashboard.isConnected) {
           final count = syncProv.pendingCount;
           final msg = count > 0
-              ? 'Mode hors ligne - $count visite${count > 1 ? "s" : ""} en attente de synchronisation'
-              : 'Mode hors ligne - données en cache';
+              ? 'Mode hors connexion - $count visite${count > 1 ? "s" : ""} en attente de synchronisation'
+              : 'Mode hors connexion - données en local';
           return Container(
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -322,18 +318,8 @@ void _loadStats() {
                     onPressed: () => PendingSyncDialog.show(
                       context,
                       provider: syncProv,
-                      onDelete: (id, action) async {
-                        final syncProvider = context.read<SyncProvider>();
-                        final visitProvider = context.read<VisitProvider>();
-                        await syncProvider.removePendingItem(id);
-                        if (action == 'create_visite') {
-                          await visitProvider.removeLocalPendingVisit(id);
-                        }
-                        await _refreshLocalPendingCount();
-                        syncProvider.refreshPendingCount();
-                      },
                     ),
-                    child: const Text('Gérer', style: TextStyle(fontSize: 12)),
+                    child: const Text('Voir', style: TextStyle(fontSize: 12)),
                   ),
               ],
             ),

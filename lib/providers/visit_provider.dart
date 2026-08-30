@@ -502,7 +502,8 @@ class VisitProvider extends ChangeNotifier {
   }
 
   /// Total a afficher : ce que le serveur annonce, plus les saisies locales
-  /// qu'il ne connait pas encore.
+  /// qu'il ne connait pas encore — et jamais moins que ce que la liste
+  /// affiche reellement.
   Future<int> _totalCount(String liste) async {
     final db = await _rawDb;
     final meta = await db.query('visits_meta',
@@ -513,7 +514,36 @@ class VisitProvider extends ChangeNotifier {
         'JOIN visits v ON v.id = l.visit_id '
         'WHERE l.liste = ? AND v.est_local = 1',
         [liste]);
-    return serverCount + ((local.first['n'] as int?) ?? 0);
+    final annonce = serverCount + ((local.first['n'] as int?) ?? 0);
+
+    // Une saisie hors ligne qui vient d'etre synchronisee n'est plus locale,
+    // et `server_count` — fige au dernier chargement reussi de la liste — ne
+    // la compte pas encore. Sans ce garde-fou, les tuiles retombaient a zero
+    // au redemarrage alors que la liste, elle, montrait bien la visite.
+    final enBase = await _countRowsInList(db, liste);
+    return annonce > enBase ? annonce : enBase;
+  }
+
+  /// Nombre de visites reellement rattachees a [liste] dans la base locale,
+  /// avec le meme perimetre « jour meme » que [_scopeToToday].
+  Future<int> _countRowsInList(Database db, String liste) async {
+    final rows = _todayScopedKeys.contains(liste)
+        ? await db.rawQuery(
+            'SELECT COUNT(*) AS n FROM visit_listes l '
+            'JOIN visits v ON v.id = l.visit_id '
+            'WHERE l.liste = ? AND (v.date_visite IS NULL '
+            'OR substr(v.date_visite, 1, 10) = ?)',
+            [liste, _todayIso()])
+        : await db.rawQuery(
+            'SELECT COUNT(*) AS n FROM visit_listes WHERE liste = ?', [liste]);
+    return (rows.first['n'] as int?) ?? 0;
+  }
+
+  static String _todayIso() {
+    final now = DateTime.now();
+    return '${now.year.toString().padLeft(4, '0')}-'
+        '${now.month.toString().padLeft(2, '0')}-'
+        '${now.day.toString().padLeft(2, '0')}';
   }
 
   Future<void> _insertLocalVisit(String liste, Visit v) async {
@@ -671,9 +701,11 @@ class VisitProvider extends ChangeNotifier {
     await _nettoyerImagesOrphelines();
   }
 
-  /// Supprime du disque les images qu'aucune saisie en attente ne référence
-  /// plus. Une donnée partie en ligne ne doit plus occuper la mémoire du
-  /// téléphone.
+  /// Supprime du disque les images que plus rien ne référence : ni une saisie
+  /// en attente, ni une visite encore présente en base locale. Ces dernières
+  /// gardent leurs fichiers même une fois synchronisées — c'est la seule copie
+  /// consultable hors connexion —, et la purge des visites anciennes finit
+  /// donc par libérer le disque.
   Future<void> _nettoyerImagesOrphelines() async {
     try {
       final db = await _rawDb;
@@ -685,6 +717,26 @@ class VisitProvider extends ChangeNotifier {
               jsonDecode(row['payload'] as String) as Map<String, dynamic>;
           for (final cle in VisitMedia.champs.keys) {
             final ref = body[cle] as String?;
+            if (ref != null) references.add(ref);
+          }
+        } catch (_) {}
+      }
+
+      // Visites conservées en base : seules celles dont la fiche mentionne une
+      // référence locale sont relues, la table pouvant être volumineuse.
+      final visites = await db.query('visits',
+          columns: ['data_json'],
+          where: 'data_json LIKE ?',
+          whereArgs: ['%${VisitMedia.scheme}%']);
+      for (final row in visites) {
+        try {
+          final visite = Visit.fromJson(
+              jsonDecode(row['data_json'] as String) as Map<String, dynamic>);
+          for (final ref in [
+            visite.visiteur?.photo,
+            visite.visiteur?.documentRecto,
+            visite.visiteur?.documentVerso,
+          ]) {
             if (ref != null) references.add(ref);
           }
         } catch (_) {}
@@ -865,12 +917,16 @@ class VisitProvider extends ChangeNotifier {
   /// identifiant local et toute modification échouait (« Échec de
   /// l'enregistrement local » alors que la connexion était bonne).
   Future<void> adoptServerVisit(int pendingId, Visit visit,
-      {required bool terminee}) async {
+      {required bool terminee, Map<String, dynamic>? payload}) async {
     try {
+      // Les fichiers restés sur l'appareil suivent la visite : sinon sa fiche
+      // n'affichait plus aucune image dès le retour hors connexion.
+      final adoptee =
+          payload == null ? visit : _conserverImagesLocales(visit, payload);
       if (terminee) {
-        await _replacePendingVisitWithTerminated(pendingId, visit);
+        await _replacePendingVisitWithTerminated(pendingId, adoptee);
       } else {
-        await _replacePendingVisit(pendingId, visit);
+        await _replacePendingVisit(pendingId, adoptee);
       }
       notifyListeners();
     } catch (e) {
@@ -1161,6 +1217,31 @@ class VisitProvider extends ChangeNotifier {
     return d.year == now.year && d.month == now.month && d.day == now.day;
   }
 
+  /// Greffe sur une visite renvoyee par le serveur les images restees sur
+  /// l'appareil. Elles ne sont plus effacees apres l'envoi : c'est la seule
+  /// copie consultable hors connexion, le serveur ne servant les siennes que
+  /// par le reseau. Le balayage des orphelines les retirera quand la visite
+  /// elle-meme quittera la base locale.
+  Visit _conserverImagesLocales(Visit visit, Map<String, dynamic> payload) {
+    final photo = payload['photo_path'] as String?;
+    final recto = payload['document_recto_path'] as String?;
+    final verso = payload['document_verso_path'] as String?;
+    final visiteur = visit.visiteur;
+    if (visiteur == null ||
+        (!VisitMedia.isLocal(photo) &&
+            !VisitMedia.isLocal(recto) &&
+            !VisitMedia.isLocal(verso))) {
+      return visit;
+    }
+    return visit.copyWith(
+      visiteur: visiteur.copyWithImages(
+        photo: VisitMedia.isLocal(photo) ? photo : null,
+        documentRecto: VisitMedia.isLocal(recto) ? recto : null,
+        documentVerso: VisitMedia.isLocal(verso) ? verso : null,
+      ),
+    );
+  }
+
   Future<void> _tryCreateOnline(String token, int pendingId,
       Future<bool> Function()? onUnauthorized) async {
     try {
@@ -1173,8 +1254,12 @@ class VisitProvider extends ChangeNotifier {
       final terminationBody = payload.remove('_termination_body') as Map<String, dynamic>?;
 
       // Les images sont encodées ici seulement, le temps de l'envoi.
-      final visit = await _visitService.createVisite(
+      final cree = await _visitService.createVisite(
           token, await VisitMedia.toApiBody(payload));
+      // Les fichiers restent sur l'appareil et suivent la visite : sans eux,
+      // la fiche d'une visite tout juste synchronisee n'affichait plus aucune
+      // image des qu'on repassait hors connexion.
+      final visit = _conserverImagesLocales(cree, payload);
 
       if (terminerApres) {
         try {
@@ -1196,9 +1281,6 @@ class VisitProvider extends ChangeNotifier {
         await _replacePendingVisit(pendingId, visit);
       }
       await _db.delete('pending_sync', where: 'id = ?', whereArgs: [pendingId]);
-      // La visite est passée côté serveur : ses fichiers locaux n'ont plus
-      // de raison d'occuper le disque.
-      await VisitMedia.discard(payload);
     } catch (e) {
       final msg = e.toString();
       if ((msg.contains('401') || msg.contains('Unauthorized')) && onUnauthorized != null) {
@@ -1301,6 +1383,58 @@ class VisitProvider extends ChangeNotifier {
   /// correspondant (compte serveur en cache + saisies locales non
   /// synchronisées). Sert aux tuiles du tableau de bord.
   Future<int> getListTotalCount(String liste) => _totalCount(liste);
+
+  /// Historique des visites d'un même visiteur, la plus récente en tête.
+  ///
+  /// La base locale fait foi — l'écran de détail reste donc lisible hors
+  /// connexion — et, si le réseau est là, une page serveur filtrée sur le
+  /// visiteur vient la compléter. Les visites renvoyées par le serveur sont
+  /// systématiquement revérifiées côté client : si l'API ignorait le filtre,
+  /// l'historique afficherait sinon les visites d'autres personnes.
+  Future<List<Visit>> getHistoriqueVisiteur(
+    String? token, {
+    required String visiteurUuid,
+    int? visiteurId,
+  }) async {
+    final parId = <int, Visit>{};
+
+    try {
+      final db = await _rawDb;
+      final rows = await db.query('visits',
+          columns: ['data_json'],
+          where: 'visiteur_uuid = ?',
+          whereArgs: [visiteurUuid]);
+      for (final row in rows) {
+        try {
+          final v = Visit.fromJson(
+              jsonDecode(row['data_json'] as String) as Map<String, dynamic>);
+          parId[v.id] = v;
+        } catch (e) {
+          debugPrint('[VisitProvider] Visite illisible dans l\'historique : $e');
+        }
+      }
+    } catch (e) {
+      debugPrint('[VisitProvider] Historique local indisponible : $e');
+    }
+
+    if (token != null && token.isNotEmpty && _connectivity.isConnected) {
+      try {
+        final result =
+            await _visitService.getVisites(token, page: 1, visiteurId: visiteurId);
+        for (final v in result.items) {
+          if (v.visiteur?.uuid == visiteurUuid ||
+              (visiteurId != null && v.visiteur?.id == visiteurId)) {
+            parId[v.id] = v;
+          }
+        }
+      } catch (e) {
+        debugPrint('[VisitProvider] Historique serveur indisponible : $e');
+      }
+    }
+
+    String cle(Visit v) => '${v.dateVisite ?? ''} ${v.heureArrivee ?? ''}';
+    return parId.values.toList()..sort((a, b) => cle(b).compareTo(cle(a)));
+  }
 
   Future<void> removeLocalPendingVisit(int pendingId) async {
     final localUuid = 'local_$pendingId';

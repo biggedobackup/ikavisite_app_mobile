@@ -8,7 +8,6 @@ import '../widgets/app_drawer.dart';
 import '../widgets/visit_card.dart';
 import '../widgets/terminate_visit_dialog.dart';
 import '../constants/colors.dart';
-import 'edit_visit_screen.dart';
 
 class VisitsInProgressScreen extends StatefulWidget {
   const VisitsInProgressScreen({super.key});
@@ -99,10 +98,6 @@ class _VisitsInProgressScreenState extends State<VisitsInProgressScreen> {
         title: const Text('Visites en cours'),
         actions: [
           IconButton(icon: const Icon(Icons.refresh_rounded, color: AppColors.ikaBlue), onPressed: _loadVisits),
-          IconButton(
-            icon: const Icon(Icons.person_rounded, color: AppColors.ikaBlue),
-            onPressed: () => Navigator.pushNamed(context, '/profile'),
-          ),
         ],
       ),
       drawer: const AppDrawer(),
@@ -143,46 +138,22 @@ class _VisitsInProgressScreenState extends State<VisitsInProgressScreen> {
                         visit: vp.visitsEnCours[i],
                         statutColor: Colors.orange,
                         statutLabel: 'en cours',
-                        trailing: Row(
-                          children: [
-                            Expanded(
-                              child: ElevatedButton.icon(
-                                onPressed: () async {
-                                  final result = await Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) => EditVisitScreen(visiteId: vp.visitsEnCours[i].id),
-                                    ),
-                                  );
-                                  if (result == true) _loadVisits();
-                                },
-                                icon: const Icon(Icons.edit_rounded, size: 16),
-                                label: const Text('Modifier', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: AppColors.ikaBlue,
-                                  foregroundColor: Colors.white,
-                                  elevation: 0,
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                                  padding: const EdgeInsets.symmetric(vertical: 10),
-                                ),
-                              ),
+                        // Une visite en cours ne se modifie plus depuis la
+                        // liste : seule la clôture reste proposée.
+                        trailing: SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            onPressed: () => _terminerVisite(vp.visitsEnCours[i]),
+                            icon: const Icon(Icons.check_circle, size: 16),
+                            label: const Text('Clôturer', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.green,
+                              foregroundColor: Colors.white,
+                              elevation: 0,
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                              padding: const EdgeInsets.symmetric(vertical: 10),
                             ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: ElevatedButton.icon(
-                                onPressed: () => _terminerVisite(vp.visitsEnCours[i]),
-                                icon: const Icon(Icons.check_circle, size: 16),
-                                label: const Text('Clôturer', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.green,
-                                  foregroundColor: Colors.white,
-                                  elevation: 0,
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                                  padding: const EdgeInsets.symmetric(vertical: 10),
-                                ),
-                              ),
-                            ),
-                          ],
+                          ),
                         ),
                       );
                     },

@@ -113,7 +113,14 @@ class DashboardProvider extends ChangeNotifier {
             'JOIN visits v ON v.id = l.visit_id '
             'WHERE l.liste = ? AND v.est_local = 1',
             [liste]);
-        return serveur + ((locales.first['n'] as int?) ?? 0);
+        final annonce = serveur + ((locales.first['n'] as int?) ?? 0);
+        // Même garde-fou que `VisitProvider._totalCount` : une saisie tout
+        // juste synchronisée n'est plus locale et n'est pas encore dans
+        // `server_count`, mais elle figure bien dans la liste.
+        final enBase = await db.rawQuery(
+            'SELECT COUNT(*) AS n FROM visit_listes WHERE liste = ?', [liste]);
+        final rows = (enBase.first['n'] as int?) ?? 0;
+        return annonce > rows ? annonce : rows;
       }
 
       final today = await compte('today');

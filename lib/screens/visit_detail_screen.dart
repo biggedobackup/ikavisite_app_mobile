@@ -28,6 +28,14 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
   String? _error;
   final Map<String, Uint8List> _decodedImages = {};
 
+  /// Visites deja enregistrees pour le meme visiteur, la plus recente en tete.
+  List<Visit> _historique = const [];
+  bool _historiqueEnCours = false;
+
+  /// Signatures de sortie de l'historique. Elles vivent a part : le rechar-
+  /// gement de la visite courante vide `_decodedImages`, pas celle-ci.
+  final Map<String, Uint8List> _historiqueImages = {};
+
   static const _grey100 = Color(0xFFF5F5F5);
   static const _grey400 = Color(0xFFBDBDBD);
   static const _grey500 = Color(0xFF9E9E9E);
@@ -96,6 +104,8 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
             });
           }
         }
+
+        if (mounted && _visit != null) await _loadHistorique();
       }
     } catch (e) {
       if (mounted) {
@@ -106,6 +116,44 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
         });
       }
     }
+  }
+
+  /// Charge les visites deja enregistrees pour le meme visiteur, puis decode
+  /// leurs signatures de sortie hors du thread UI.
+  Future<void> _loadHistorique() async {
+    final visiteur = _visit?.visiteur;
+    if (visiteur == null) return;
+
+    setState(() => _historiqueEnCours = true);
+    final provider = context.read<VisitProvider>();
+    final token = _getToken();
+    final visites = await provider.getHistoriqueVisiteur(
+      token,
+      visiteurUuid: visiteur.uuid,
+      visiteurId: visiteur.id,
+    );
+
+    final raws = <String>[];
+    for (final v in visites) {
+      final sig = v.signatureSortie;
+      if (sig == null || sig.isEmpty || sig.startsWith('http') || sig.startsWith('/')) {
+        continue;
+      }
+      if (VisitMedia.isLocal(sig)) continue;
+      raws.add(sig);
+    }
+    final decodees = raws.isEmpty
+        ? const <String, Uint8List>{}
+        : _decodeBase64Images(raws);
+
+    if (!mounted) return;
+    setState(() {
+      _historique = visites;
+      _historiqueImages
+        ..clear()
+        ..addAll(decodees);
+      _historiqueEnCours = false;
+    });
   }
 
   @override
@@ -195,6 +243,7 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
   Uint8List? _getDecodedImage(String raw) {
     if (VisitMedia.isLocal(raw)) return null;
     if (_decodedImages.containsKey(raw)) return _decodedImages[raw];
+    if (_historiqueImages.containsKey(raw)) return _historiqueImages[raw];
     if (raw.startsWith('data:image')) {
       try {
         _decodedImages[raw] = base64.decode(raw.split(',').last);
@@ -295,35 +344,6 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
             _buildImageRow('Pièce d\'identité (verso)', v.visiteur?.documentVerso),
           ]),
           const SizedBox(height: 12),
-          _buildSection('Signatures', [
-            _buildImageRow('Signature de sortie', v.signatureSortie),
-          ]),
-          const SizedBox(height: 12),
-          _buildSection('Informations de visite', [
-            _buildDetailRow(Icons.calendar_today, 'Date', v.dateVisite ?? '-'),
-            _buildDetailRow(Icons.access_time, 'Heure d\'arrivée', v.heureArrivee ?? '-'),
-            _buildDetailRow(Icons.exit_to_app, 'Heure de départ', v.heureDepart ?? '-'),
-            _buildDetailRow(Icons.flag, 'Motif', v.motif ?? '-'),
-            if (v.observations != null && v.observations!.isNotEmpty)
-              _buildDetailRow(Icons.note, 'Observations', v.observations!),
-          ]),
-          const SizedBox(height: 12),
-          _buildSection('Porte d\'entrée', [
-            _buildDetailRow(Icons.door_front_door, 'Titre', v.porteEntree?.titre ?? '-'),
-            _buildDetailRow(Icons.location_on, 'Emplacement', v.porteEntree?.emplacement ?? '-'),
-          ]),
-          const SizedBox(height: 12),
-          _buildSection('Personnel assigné', [
-            _buildDetailRow(Icons.badge, 'Nom', v.personnelNomComplet),
-            _buildDetailRow(Icons.work, 'Fonction', v.personnel?.fonction ?? '-'),
-            _buildDetailRow(Icons.business, 'Département', v.personnel?.departement ?? '-'),
-          ]),
-          const SizedBox(height: 12),
-          _buildSection('Type de visite', [
-            _buildDetailRow(Icons.category, 'Nom', v.typeVisite?.nom ?? '-'),
-            _buildDetailRow(Icons.description, 'Description', v.typeVisite?.description ?? '-'),
-          ]),
-          const SizedBox(height: 12),
           _buildSection('Données du visiteur', [
             _buildDetailRow(Icons.person, 'Nom', v.visiteur?.nom ?? '-'),
             _buildDetailRow(Icons.person_outline, 'Prénom', v.visiteur?.prenom ?? '-'),
@@ -342,15 +362,176 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
             _buildDetailRow(Icons.date_range, 'Date de delivrance', v.visiteur?.dateDelivrance ?? '-'),
           ]),
           const SizedBox(height: 12),
-          _buildSection('Métadonnées', [
-            _buildDetailRow(Icons.confirmation_number, 'Badge', v.numeroBadge ?? '-'),
-            _buildDetailRow(Icons.info, 'UUID', v.uuid),
-            _buildDetailRow(Icons.date_range, 'Créé le', v.createdAt ?? '-'),
-            _buildDetailRow(Icons.update, 'Modifié le', v.updatedAt ?? '-'),
-          ]),
+          _buildHistoriqueSection(),
         ],
       ),
     );
+  }
+
+  // ── Historique de visite ──
+
+  static const _entetesHistorique = [
+    'Date',
+    'Heure A.',
+    'Heure D.',
+    'Type de visite',
+    'Personne visitée',
+    'Département',
+    'Point entrée / Sortie',
+    'N° Badge',
+    'Signature',
+  ];
+
+  static const Map<int, TableColumnWidth> _largeursHistorique = {
+    0: FixedColumnWidth(86),
+    1: FixedColumnWidth(64),
+    2: FixedColumnWidth(64),
+    3: FixedColumnWidth(120),
+    4: FixedColumnWidth(132),
+    5: FixedColumnWidth(120),
+    6: FixedColumnWidth(132),
+    7: FixedColumnWidth(80),
+    8: FixedColumnWidth(96),
+  };
+
+  /// Toutes les visites du meme visiteur, en tableau. La signature de sortie
+  /// y figure en vignette : c'est la preuve de fin de visite.
+  Widget _buildHistoriqueSection() {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 8, offset: const Offset(0, 2)),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+            child: Row(
+              children: [
+                Text('Historique de visite',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _grey800)),
+                const SizedBox(width: 8),
+                if (_historiqueEnCours)
+                  const SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(strokeWidth: 1.5),
+                  )
+                else
+                  Text('(${_historique.length})',
+                      style: TextStyle(fontSize: 12, color: _grey500)),
+              ],
+            ),
+          ),
+          Divider(height: 1, color: _grey100),
+          if (_historique.isEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+              child: Text(
+                  _historiqueEnCours
+                      ? 'Chargement de l\'historique...'
+                      : 'Aucune autre visite enregistrée pour ce visiteur',
+                  style: TextStyle(fontSize: 12, color: _grey500)),
+            )
+          else
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+              child: Table(
+                columnWidths: _largeursHistorique,
+                border: TableBorder.all(color: const Color(0xFFCBD5E1), width: 0.7),
+                defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+                children: [
+                  TableRow(
+                    decoration: const BoxDecoration(color: Color(0xFFDCE6F1)),
+                    children: [
+                      for (final entete in _entetesHistorique)
+                        _celluleHistorique(entete, entete: true),
+                    ],
+                  ),
+                  for (final v in _historique) _ligneHistorique(v),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  TableRow _ligneHistorique(Visit v) {
+    final courante = v.id == widget.visiteId;
+    return TableRow(
+      decoration: courante
+          ? BoxDecoration(color: const Color(0xFF1A237E).withValues(alpha: 0.04))
+          : null,
+      children: [
+        _celluleHistorique(_formatDateCourte(v.dateVisite), enGras: courante),
+        _celluleHistorique(_formatHeure(v.heureArrivee)),
+        _celluleHistorique(_formatHeure(v.heureDepart)),
+        _celluleHistorique(v.typeVisite?.nom ?? '-'),
+        _celluleHistorique(v.personnelNomComplet.isEmpty ? '-' : v.personnelNomComplet),
+        _celluleHistorique(v.personnel?.departement ?? '-'),
+        _celluleHistorique(v.porteEntree?.titre ?? '-'),
+        _celluleHistorique(v.numeroBadge ?? '-'),
+        _celluleSignature(v.signatureSortie),
+      ],
+    );
+  }
+
+  Widget _celluleHistorique(String valeur, {bool entete = false, bool enGras = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+      child: Text(
+        valeur,
+        textAlign: entete ? TextAlign.center : TextAlign.left,
+        style: TextStyle(
+          fontSize: 11,
+          height: 1.25,
+          color: entete ? _grey800 : Colors.black87,
+          fontWeight: entete || enGras ? FontWeight.w600 : FontWeight.w400,
+        ),
+      ),
+    );
+  }
+
+  Widget _celluleSignature(String? signature) {
+    if (signature == null || signature.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+        child: Text('-', style: TextStyle(fontSize: 11, color: _grey400)),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+      child: GestureDetector(
+        onTap: () => _showFullImage(signature, 'Signature de sortie'),
+        child: _buildImageWidget(signature,
+            width: 84, height: 34, fit: BoxFit.contain),
+      ),
+    );
+  }
+
+  String _formatDateCourte(String? valeur) {
+    if (valeur == null || valeur.isEmpty) return '-';
+    final d = DateTime.tryParse(valeur);
+    if (d == null) return valeur.length >= 10 ? valeur.substring(0, 10) : valeur;
+    return '${d.day.toString().padLeft(2, '0')}/'
+        '${d.month.toString().padLeft(2, '0')}/${d.year}';
+  }
+
+  String _formatHeure(String? valeur) {
+    if (valeur == null || valeur.isEmpty) return '-';
+    final d = DateTime.tryParse(valeur);
+    if (d != null) {
+      return '${d.hour.toString().padLeft(2, '0')}:'
+          '${d.minute.toString().padLeft(2, '0')}';
+    }
+    return valeur.length >= 5 ? valeur.substring(0, 5) : valeur;
   }
 
   Widget _buildSection(String title, List<Widget> children) {
@@ -444,7 +625,8 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
     );
   }
 
-  Widget _buildImageWidget(String imageData, {double? width, double height = 120}) {
+  Widget _buildImageWidget(String imageData,
+      {double? width, double height = 120, BoxFit fit = BoxFit.cover}) {
     // Image restée sur l'appareil : visite saisie hors ligne, pas encore
     // synchronisée. On la lit directement depuis le disque.
     final local = VisitMedia.resolve(imageData);
@@ -455,7 +637,7 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
           File(local),
           width: width,
           height: height,
-          fit: BoxFit.cover,
+          fit: fit,
           errorBuilder: (context, error, stack) => _imageErrorPlaceholder(height),
           cacheHeight: (height * 0.8).round(),
         ),
@@ -470,7 +652,7 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
           decoded,
           width: width,
           height: height,
-          fit: BoxFit.cover,
+          fit: fit,
           errorBuilder: (context, error, stack) => _imageErrorPlaceholder(height),
           cacheHeight: (height * 0.8).round(),
         ),
@@ -491,7 +673,7 @@ class _VisitDetailScreenState extends State<VisitDetailScreen> {
         imageUrl: url,
         width: width,
         height: height,
-        fit: BoxFit.cover,
+        fit: fit,
         memCacheWidth: width != null && width.isFinite ? (width * pixelRatio).round() : null,
         memCacheHeight: height.isFinite ? (height * pixelRatio).round() : null,
         placeholder: (_, _) => _imageLoadingPlaceholder(height),
